@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mobile POS</title>
 <style>
@@ -380,7 +383,7 @@ const DB = (() => {
 
     let customers = read(KEYS.customers, null);
     if (!customers) {
-      customers = [{ id: 1, name: 'Walk-in Customer', phone: '', address: '', createdAt: new Date().toISOString() }];
+      customers = [{ id: 1, name: 'Walk-in Customer', phone: '', address: '', createdAt: new Date().toISOString(), creditBalance: 0, walletBalance: 0 }];
       write(KEYS.customers, customers);
       const counters = read(KEYS.counters, {});
       counters.customer = 1;
@@ -1057,6 +1060,7 @@ PAGES.pos = async function (mount, session) {
   let products = DB.getProducts();
   const categories = DB.getCategories();
   let customers = DB.getCustomers();
+  let mbAccounts = DB.getMbAccounts();
   const settings = DB.getSettings();
   let cart = []; // {productId, name, price, qty, stock}
   let activeCategory = 'all';
@@ -1095,6 +1099,7 @@ PAGES.pos = async function (mount, session) {
                 <select class="form-select" id="customerSelect"></select>
                 <button class="btn btn-outline-secondary" type="button" id="addCustomerBtn" title="Add new customer"><i class="fas fa-user-plus"></i></button>
               </div>
+              <div class="small mt-1" id="custInfoBox"></div>
             </div>
 
             <div class="row g-2 mb-2">
@@ -1113,23 +1118,39 @@ PAGES.pos = async function (mount, session) {
             <div class="d-flex justify-content-between small text-muted"><span>Tax</span><span id="sumTax">+ ${APP.fmt(0)}</span></div>
             <div class="d-flex justify-content-between fs-5 fw-bold mt-1"><span>Total</span><span id="sumTotal">${APP.fmt(0)}</span></div>
 
+            <div class="form-check mt-2 d-none" id="walletUseWrap">
+              <input class="form-check-input" type="checkbox" id="useWalletChk">
+              <label class="form-check-label small" for="useWalletChk" id="walletUseLabel">Use customer wallet balance</label>
+            </div>
+            <div class="d-flex justify-content-between small text-success d-none" id="walletAppliedRow"><span>Wallet Applied</span><span id="sumWalletApplied">${APP.fmt(0)}</span></div>
+
             <div class="row g-2 mt-2">
               <div class="col-6">
                 <label class="form-label small">Payment Method</label>
                 <select class="form-select" id="paymentMethod">
                   <option value="Cash">Cash</option>
                   <option value="Card">Card</option>
-                  <option value="Mobile Wallet">Mobile Wallet (EasyPaisa/JazzCash)</option>
+                  <option value="Mobile Wallet">Online / Mobile Account (JazzCash, EasyPaisa, Bank)</option>
                 </select>
               </div>
               <div class="col-6">
-                <label class="form-label small">Amount Paid</label>
+                <label class="form-label small">Amount Tendered</label>
                 <input type="number" min="0" class="form-control" id="amountPaid" placeholder="0">
               </div>
             </div>
+            <div class="mb-2 mt-2 d-none" id="mbAccountWrap">
+              <label class="form-label small">Received In Account</label>
+              <select class="form-select" id="mbAccountSelect"></select>
+            </div>
+
             <div class="d-flex justify-content-between small mt-2">
               <span>Change to return</span><strong id="changeDue">${APP.fmt(0)}</strong>
             </div>
+            <div class="form-check mt-1 d-none" id="addToWalletWrap">
+              <input class="form-check-input" type="checkbox" id="addToWalletChk">
+              <label class="form-check-label small" for="addToWalletChk">Add this extra amount to customer's wallet instead of returning change</label>
+            </div>
+            <div class="alert alert-warning py-2 small mt-2 d-none" id="creditWarningBox"></div>
 
             <button class="btn btn-brand w-100 py-2 mt-3 fw-semibold" id="checkoutBtn" disabled>
               <i class="fas fa-circle-check me-1"></i> Complete Sale
@@ -1254,6 +1275,36 @@ PAGES.pos = async function (mount, session) {
     recalc();
   }
 
+  function getSelectedCustomer() {
+    const id = Number(document.getElementById('customerSelect').value);
+    return customers.find(c => c.id === id) || null;
+  }
+
+  function updateCustomerInfoPanel() {
+    const cust = getSelectedCustomer();
+    const box = document.getElementById('custInfoBox');
+    const walletWrap = document.getElementById('walletUseWrap');
+    if (!cust || cust.id === 1) {
+      box.innerHTML = '';
+      walletWrap.classList.add('d-none');
+      document.getElementById('useWalletChk').checked = false;
+      return;
+    }
+    const wallet = cust.walletBalance || 0;
+    const credit = cust.creditBalance || 0;
+    let html = '';
+    if (wallet > 0) html += `<span class="badge badge-stock-ok me-1"><i class="fas fa-wallet"></i> Wallet: ${APP.fmt(wallet)}</span>`;
+    if (credit > 0) html += `<span class="badge badge-stock-low"><i class="fas fa-triangle-exclamation"></i> Owes: ${APP.fmt(credit)}</span>`;
+    box.innerHTML = html;
+    if (wallet > 0) {
+      walletWrap.classList.remove('d-none');
+      document.getElementById('walletUseLabel').textContent = `Use wallet balance (${APP.fmt(wallet)} available)`;
+    } else {
+      walletWrap.classList.add('d-none');
+      document.getElementById('useWalletChk').checked = false;
+    }
+  }
+
   function recalc() {
     const subtotal = cart.reduce((s, c) => s + c.price * c.qty, 0);
     const discount = Number(document.getElementById('discountInput').value) || 0;
@@ -1261,22 +1312,75 @@ PAGES.pos = async function (mount, session) {
     const taxable = Math.max(subtotal - discount, 0);
     const tax = taxable * (taxPct / 100);
     const total = taxable + tax;
-    const paid = Number(document.getElementById('amountPaid').value) || 0;
-    const change = paid - total;
+    const tendered = Number(document.getElementById('amountPaid').value) || 0;
+
+    const cust = getSelectedCustomer();
+    const useWallet = document.getElementById('useWalletChk').checked && cust && cust.id !== 1;
+    const walletApplied = useWallet ? Math.min(cust.walletBalance || 0, total) : 0;
+
+    const effectivePaid = tendered + walletApplied;
+    const diff = effectivePaid - total; // negative = shortfall (credit), positive = surplus (change/wallet-add)
 
     document.getElementById('sumSubtotal').textContent = APP.fmt(subtotal);
     document.getElementById('sumDiscount').textContent = '- ' + APP.fmt(discount);
     document.getElementById('sumTax').textContent = '+ ' + APP.fmt(tax);
     document.getElementById('sumTotal').textContent = APP.fmt(total);
-    document.getElementById('changeDue').textContent = APP.fmt(change > 0 ? change : 0);
+
+    const walletRow = document.getElementById('walletAppliedRow');
+    if (walletApplied > 0) { walletRow.classList.remove('d-none'); document.getElementById('sumWalletApplied').textContent = '- ' + APP.fmt(walletApplied); }
+    else walletRow.classList.add('d-none');
+
+    const addToWalletWrap = document.getElementById('addToWalletWrap');
+    const creditBox = document.getElementById('creditWarningBox');
+    const canUseCreditWallet = cust && cust.id !== 1;
+
+    if (diff > 0) {
+      document.getElementById('changeDue').textContent = APP.fmt(diff);
+      if (canUseCreditWallet) { addToWalletWrap.classList.remove('d-none'); } else { addToWalletWrap.classList.add('d-none'); document.getElementById('addToWalletChk').checked = false; }
+      creditBox.classList.add('d-none');
+    } else if (diff < 0) {
+      document.getElementById('changeDue').textContent = APP.fmt(0);
+      addToWalletWrap.classList.add('d-none');
+      document.getElementById('addToWalletChk').checked = false;
+      creditBox.classList.remove('d-none');
+      creditBox.innerHTML = canUseCreditWallet
+        ? `<i class="fas fa-triangle-exclamation me-1"></i>Rs ${Math.abs(diff).toLocaleString()} short — this will be added as <strong>credit</strong> for ${APP.escapeHtml(cust.name)}.`
+        : `<i class="fas fa-triangle-exclamation me-1"></i>Amount tendered is less than the total. Select a registered customer to track this as credit, or collect the full amount.`;
+    } else {
+      document.getElementById('changeDue').textContent = APP.fmt(0);
+      addToWalletWrap.classList.add('d-none');
+      document.getElementById('addToWalletChk').checked = false;
+      creditBox.classList.add('d-none');
+    }
+
     document.getElementById('checkoutBtn').disabled = cart.length === 0;
 
-    return { subtotal, discount, tax, total, paid, change };
+    return { subtotal, discount, tax, total, tendered, walletApplied, effectivePaid, diff };
   }
 
   function renderCustomers() {
     const sel = document.getElementById('customerSelect');
     sel.innerHTML = customers.map(c => `<option value="${c.id}">${APP.escapeHtml(c.name)}${c.phone ? ' - ' + c.phone : ''}</option>`).join('');
+  }
+
+  function fillMbAccountSelect() {
+    const sel = document.getElementById('mbAccountSelect');
+    sel.innerHTML = mbAccounts.map(a => `<option value="${a.id}">${APP.escapeHtml(a.provider)} - ${APP.escapeHtml(a.label)} (${APP.escapeHtml(a.accountNumber)})</option>`).join('');
+  }
+
+  function updatePaymentMethodUI() {
+    const method = document.getElementById('paymentMethod').value;
+    const wrap = document.getElementById('mbAccountWrap');
+    if (method === 'Mobile Wallet') {
+      if (!mbAccounts.length) {
+        wrap.classList.add('d-none');
+        APP.toast('No mobile banking accounts set up yet — add one from Mobile Banking Services first.', 'warning');
+      } else {
+        wrap.classList.remove('d-none');
+      }
+    } else {
+      wrap.classList.add('d-none');
+    }
   }
 
   // ---- events ----
@@ -1285,6 +1389,9 @@ PAGES.pos = async function (mount, session) {
   document.getElementById('discountInput').addEventListener('input', recalc);
   document.getElementById('taxInput').addEventListener('input', recalc);
   document.getElementById('amountPaid').addEventListener('input', recalc);
+  document.getElementById('useWalletChk').addEventListener('change', recalc);
+  document.getElementById('customerSelect').addEventListener('change', () => { updateCustomerInfoPanel(); recalc(); });
+  document.getElementById('paymentMethod').addEventListener('change', updatePaymentMethodUI);
 
   document.getElementById('addCustomerBtn').addEventListener('click', () => {
     new bootstrap.Modal(document.getElementById('addCustomerModal')).show();
@@ -1293,7 +1400,7 @@ PAGES.pos = async function (mount, session) {
     const name = document.getElementById('newCustName').value.trim();
     if (!name) { APP.toast('Customer name is required', 'warning'); return; }
     const phone = document.getElementById('newCustPhone').value.trim();
-    const newCust = { id: DB.nextId('customer'), name, phone, address: '', createdAt: new Date().toISOString() };
+    const newCust = { id: DB.nextId('customer'), name, phone, address: '', createdAt: new Date().toISOString(), creditBalance: 0, walletBalance: 0 };
     customers.push(newCust);
     DB.saveCustomers(customers);
     renderCustomers();
@@ -1301,14 +1408,31 @@ PAGES.pos = async function (mount, session) {
     document.getElementById('newCustName').value = '';
     document.getElementById('newCustPhone').value = '';
     bootstrap.Modal.getInstance(document.getElementById('addCustomerModal')).hide();
+    updateCustomerInfoPanel();
     APP.toast('Customer added');
   });
 
   document.getElementById('checkoutBtn').addEventListener('click', () => {
     const totals = recalc();
     if (cart.length === 0) return;
-    if (totals.paid < totals.total) {
-      if (!APP.confirmAction('Amount paid is less than total (credit sale). Continue anyway?')) return;
+
+    const cust = getSelectedCustomer();
+    const canUseCreditWallet = cust && cust.id !== 1;
+
+    if (totals.diff < 0) {
+      if (!canUseCreditWallet) {
+        if (!APP.confirmAction('Amount tendered is less than the total and no registered customer is selected, so this shortfall will not be tracked. Continue anyway?')) return;
+      } else {
+        if (!APP.confirmAction(`Rs ${Math.abs(totals.diff).toLocaleString()} will be added as credit for ${cust.name}. Continue?`)) return;
+      }
+    }
+
+    const paymentMethod = document.getElementById('paymentMethod').value;
+    const addToWallet = canUseCreditWallet && totals.diff > 0 && document.getElementById('addToWalletChk').checked;
+    let mbAccountId = null;
+    if (paymentMethod === 'Mobile Wallet') {
+      const sel = document.getElementById('mbAccountSelect');
+      if (mbAccounts.length && sel.value) mbAccountId = Number(sel.value);
     }
 
     // Re-validate stock right before committing (in case of concurrent changes)
@@ -1325,25 +1449,69 @@ PAGES.pos = async function (mount, session) {
     });
     DB.saveProducts(products);
 
-    const custId = Number(document.getElementById('customerSelect').value);
-    const customer = customers.find(c => c.id === custId);
+    const creditAdded = totals.diff < 0 && canUseCreditWallet ? Math.abs(totals.diff) : 0;
+    const addedToWallet = addToWallet ? totals.diff : 0;
+    const changeReturned = (!addToWallet && totals.diff > 0) ? totals.diff : 0;
+
+    // Update customer wallet/credit balances
+    if (canUseCreditWallet) {
+      customers = customers.map(c => {
+        if (c.id !== cust.id) return c;
+        let wallet = c.walletBalance || 0;
+        let credit = c.creditBalance || 0;
+        if (totals.walletApplied > 0) wallet -= totals.walletApplied;
+        if (addedToWallet > 0) wallet += addedToWallet;
+        if (creditAdded > 0) credit += creditAdded;
+        return { ...c, walletBalance: Math.max(wallet, 0), creditBalance: Math.max(credit, 0) };
+      });
+      DB.saveCustomers(customers);
+    }
+
     const sale = {
       id: DB.nextId('sale'),
       invoiceNo: DB.nextInvoiceNo(),
       date: new Date().toISOString(),
-      customerId: custId,
-      customerName: customer ? customer.name : 'Walk-in Customer',
+      customerId: cust ? cust.id : 1,
+      customerName: cust ? cust.name : 'Walk-in Customer',
       items: cart.map(c => ({ productId: c.productId, name: c.name, qty: c.qty, price: c.price, total: c.price * c.qty })),
       subtotal: totals.subtotal,
       discount: totals.discount,
       tax: totals.tax,
       total: totals.total,
-      paid: totals.paid,
-      change: totals.change > 0 ? totals.change : 0,
-      paymentMethod: document.getElementById('paymentMethod').value,
+      tendered: totals.tendered,
+      walletApplied: totals.walletApplied,
+      paid: totals.effectivePaid,
+      change: changeReturned,
+      creditAdded,
+      addedToWallet,
+      paymentMethod,
+      mbAccountId,
       userId: session.userId,
       userName: session.fullName
     };
+
+    // Record mobile-banking transaction if payment landed in a mobile/online account
+    if (mbAccountId && totals.tendered > 0) {
+      const mbTxns = DB.getMbTransactions();
+      const txn = {
+        id: DB.nextId('mbTxn'),
+        date: sale.date,
+        type: 'sale',
+        accountId: mbAccountId,
+        biller: '',
+        custName: sale.customerName,
+        custPhone: cust ? (cust.phone || '') : '',
+        amount: totals.tendered,
+        commission: 0,
+        note: 'POS Sale ' + sale.invoiceNo,
+        userId: session.userId,
+        userName: session.fullName
+      };
+      mbTxns.push(txn);
+      DB.saveMbTransactions(mbTxns);
+      sale.mbTxnId = txn.id;
+    }
+
     const sales = DB.getSales();
     sales.push(sale);
     DB.saveSales(sales);
@@ -1355,12 +1523,16 @@ PAGES.pos = async function (mount, session) {
     cart = [];
     document.getElementById('discountInput').value = 0;
     document.getElementById('amountPaid').value = '';
+    document.getElementById('useWalletChk').checked = false;
+    document.getElementById('addToWalletChk').checked = false;
     document.getElementById('customerSelect').value = 1;
+    updateCustomerInfoPanel();
     renderCart(); renderGrid();
   });
 
   function showReceipt(sale) {
     const s = DB.getSettings();
+    const acct = sale.mbAccountId ? mbAccounts.find(a => a.id === sale.mbAccountId) : null;
     document.getElementById('printArea').innerHTML = `
       <div class="receipt">
         <div class="text-center">
@@ -1383,8 +1555,12 @@ PAGES.pos = async function (mount, session) {
         <div class="d-flex justify-content-between"><span>Discount</span><span>-${APP.fmt(sale.discount)}</span></div>
         <div class="d-flex justify-content-between"><span>Tax</span><span>+${APP.fmt(sale.tax)}</span></div>
         <div class="d-flex justify-content-between fw-bold"><span>TOTAL</span><span>${APP.fmt(sale.total)}</span></div>
-        <div class="d-flex justify-content-between"><span>Paid (${sale.paymentMethod})</span><span>${APP.fmt(sale.paid)}</span></div>
+        ${sale.walletApplied ? `<div class="d-flex justify-content-between"><span>Wallet Applied</span><span>-${APP.fmt(sale.walletApplied)}</span></div>` : ''}
+        <div class="d-flex justify-content-between"><span>Tendered (${sale.paymentMethod})</span><span>${APP.fmt(sale.tendered)}</span></div>
+        ${acct ? `<div>Received in: ${APP.escapeHtml(acct.provider)} - ${APP.escapeHtml(acct.label)}</div>` : ''}
         <div class="d-flex justify-content-between"><span>Change</span><span>${APP.fmt(sale.change)}</span></div>
+        ${sale.addedToWallet ? `<div class="d-flex justify-content-between text-success"><span>Added to Wallet</span><span>${APP.fmt(sale.addedToWallet)}</span></div>` : ''}
+        ${sale.creditAdded ? `<div class="d-flex justify-content-between text-danger"><span>Added as Credit</span><span>${APP.fmt(sale.creditAdded)}</span></div>` : ''}
         <hr>
         <div class="text-center small">${APP.escapeHtml(s.receiptFooter || '')}</div>
         <hr>
@@ -1400,6 +1576,9 @@ PAGES.pos = async function (mount, session) {
 
   renderChips();
   renderCustomers();
+  fillMbAccountSelect();
+  updateCustomerInfoPanel();
+  updatePaymentMethodUI();
   renderGrid();
   renderCart();
 };
@@ -1728,6 +1907,7 @@ PAGES.customers = async function (mount, session) {
   let customers = DB.getCustomers();
   const sales = DB.getSales();
   let editingId = null;
+  let walletCustId = null;
 
   mount.innerHTML = `
     <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
@@ -1738,7 +1918,7 @@ PAGES.customers = async function (mount, session) {
       <div class="card-body p-0">
         <div class="table-responsive">
           <table class="table mb-0 align-middle">
-            <thead><tr><th>Name</th><th>Phone</th><th>Address</th><th class="text-end">Total Spent</th><th class="text-end">Orders</th><th class="text-end">Actions</th></tr></thead>
+            <thead><tr><th>Name</th><th>Phone</th><th>Address</th><th class="text-end">Total Spent</th><th class="text-end">Orders</th><th class="text-end">Wallet</th><th class="text-end">Credit Owed</th><th class="text-end">Actions</th></tr></thead>
             <tbody id="tbody"></tbody>
           </table>
         </div>
@@ -1758,6 +1938,37 @@ PAGES.customers = async function (mount, session) {
         </div>
       </div>
     </div>
+
+    <div class="modal fade" id="walletModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header"><h6 class="modal-title">Wallet &amp; Credit — <span id="walletCustName"></span></h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body">
+            <div class="row g-2 mb-3">
+              <div class="col-6"><div class="kpi-card c2 h-100"><div class="kpi-label">Wallet Balance</div><div class="kpi-value" id="walletCurBalance">-</div></div></div>
+              <div class="col-6"><div class="kpi-card c3 h-100"><div class="kpi-label">Credit Owed</div><div class="kpi-value" id="creditCurBalance">-</div></div></div>
+            </div>
+            <hr>
+            <div class="mb-3">
+              <label class="form-label small fw-semibold">Record Credit Payment</label>
+              <div class="text-muted small mb-1">Customer is paying off some or all of what they owe.</div>
+              <div class="input-group">
+                <input type="number" min="0" class="form-control" id="creditPayInput" placeholder="Amount received">
+                <button class="btn btn-brand" id="applyCreditPayBtn">Apply</button>
+              </div>
+            </div>
+            <div>
+              <label class="form-label small fw-semibold">Adjust Wallet Balance</label>
+              <div class="text-muted small mb-1">Manually top up (or correct) this customer's wallet.</div>
+              <div class="input-group">
+                <input type="number" class="form-control" id="walletAdjustInput" placeholder="Amount (use negative to deduct)">
+                <button class="btn btn-brand" id="applyWalletAdjustBtn">Apply</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   `;
 
   function stats(custId) {
@@ -1770,6 +1981,8 @@ PAGES.customers = async function (mount, session) {
     const rows = customers.filter(c => !t || c.name.toLowerCase().includes(t) || (c.phone || '').includes(t));
     document.getElementById('tbody').innerHTML = rows.length ? rows.map(c => {
       const st = stats(c.id);
+      const wallet = c.walletBalance || 0;
+      const credit = c.creditBalance || 0;
       return `
       <tr>
         <td class="fw-semibold">${APP.escapeHtml(c.name)}</td>
@@ -1777,15 +1990,19 @@ PAGES.customers = async function (mount, session) {
         <td>${APP.escapeHtml(c.address || '—')}</td>
         <td class="text-end">${APP.fmt(st.total)}</td>
         <td class="text-end">${st.count}</td>
+        <td class="text-end">${wallet > 0 ? `<span class="badge badge-stock-ok">${APP.fmt(wallet)}</span>` : '—'}</td>
+        <td class="text-end">${credit > 0 ? `<span class="badge badge-stock-low">${APP.fmt(credit)}</span>` : '—'}</td>
         <td class="text-end">
+          ${c.id !== 1 ? `<button class="btn btn-sm btn-outline-primary walletBtn" data-id="${c.id}" title="Wallet & Credit"><i class="fas fa-wallet me-1"></i>Wallet</button>` : ''}
           <button class="btn btn-sm btn-outline-secondary editBtn" data-id="${c.id}"><i class="fas fa-pen"></i></button>
           ${c.id !== 1 ? `<button class="btn btn-sm btn-outline-danger delBtn" data-id="${c.id}"><i class="fas fa-trash"></i></button>` : ''}
         </td>
       </tr>`;
-    }).join('') : `<tr><td colspan="6" class="text-center text-muted py-4">No customers found.</td></tr>`;
+    }).join('') : `<tr><td colspan="8" class="text-center text-muted py-4">No customers found.</td></tr>`;
 
     document.getElementById('tbody').querySelectorAll('.editBtn').forEach(b => b.addEventListener('click', () => openEdit(Number(b.dataset.id))));
     document.getElementById('tbody').querySelectorAll('.delBtn').forEach(b => b.addEventListener('click', () => del(Number(b.dataset.id))));
+    document.getElementById('tbody').querySelectorAll('.walletBtn').forEach(b => b.addEventListener('click', () => openWallet(Number(b.dataset.id))));
   }
 
   function openAdd() {
@@ -1812,6 +2029,44 @@ PAGES.customers = async function (mount, session) {
     APP.toast('Customer deleted');
   }
 
+  function openWallet(id) {
+    const c = customers.find(x => x.id === id);
+    if (!c) return;
+    walletCustId = id;
+    document.getElementById('walletCustName').textContent = c.name;
+    document.getElementById('walletCurBalance').textContent = APP.fmt(c.walletBalance || 0);
+    document.getElementById('creditCurBalance').textContent = APP.fmt(c.creditBalance || 0);
+    document.getElementById('creditPayInput').value = '';
+    document.getElementById('walletAdjustInput').value = '';
+    new bootstrap.Modal(document.getElementById('walletModal')).show();
+  }
+
+  document.getElementById('applyCreditPayBtn').addEventListener('click', () => {
+    const amount = Number(document.getElementById('creditPayInput').value) || 0;
+    if (amount <= 0) { APP.toast('Enter a valid amount', 'warning'); return; }
+    customers = customers.map(c => c.id === walletCustId ? { ...c, creditBalance: Math.max((c.creditBalance || 0) - amount, 0) } : c);
+    DB.saveCustomers(customers);
+    const c = customers.find(x => x.id === walletCustId);
+    DB.logActivity(session.fullName, 'Credit Payment Received', `${c.name} — ${APP.fmt(amount)}`);
+    document.getElementById('creditCurBalance').textContent = APP.fmt(c.creditBalance || 0);
+    document.getElementById('creditPayInput').value = '';
+    render(document.getElementById('searchBox').value);
+    APP.toast('Credit payment recorded');
+  });
+
+  document.getElementById('applyWalletAdjustBtn').addEventListener('click', () => {
+    const amount = Number(document.getElementById('walletAdjustInput').value) || 0;
+    if (amount === 0) { APP.toast('Enter a non-zero amount', 'warning'); return; }
+    customers = customers.map(c => c.id === walletCustId ? { ...c, walletBalance: Math.max((c.walletBalance || 0) + amount, 0) } : c);
+    DB.saveCustomers(customers);
+    const c = customers.find(x => x.id === walletCustId);
+    DB.logActivity(session.fullName, 'Wallet Adjusted', `${c.name} — ${amount > 0 ? '+' : ''}${APP.fmt(amount)}`);
+    document.getElementById('walletCurBalance').textContent = APP.fmt(c.walletBalance || 0);
+    document.getElementById('walletAdjustInput').value = '';
+    render(document.getElementById('searchBox').value);
+    APP.toast('Wallet balance updated');
+  });
+
   document.getElementById('addBtn').addEventListener('click', openAdd);
   document.getElementById('searchBox').addEventListener('input', (e) => render(e.target.value));
   document.getElementById('saveBtn').addEventListener('click', () => {
@@ -1821,7 +2076,7 @@ PAGES.customers = async function (mount, session) {
     if (editingId) {
       customers = customers.map(c => c.id === editingId ? { ...c, ...data } : c);
     } else {
-      customers.push({ id: DB.nextId('customer'), ...data, createdAt: new Date().toISOString() });
+      customers.push({ id: DB.nextId('customer'), ...data, createdAt: new Date().toISOString(), creditBalance: 0, walletBalance: 0 });
     }
     DB.saveCustomers(customers);
     bootstrap.Modal.getInstance(document.getElementById('custModal')).hide();
@@ -2086,6 +2341,7 @@ PAGES.sales = async function (mount, session) {
     const s = sales.find(x => x.id === id);
     if (!s) return;
     const set = DB.getSettings();
+    const acct = s.mbAccountId ? (DB.getMbAccounts().find(a => a.id === s.mbAccountId)) : null;
     document.getElementById('printArea').innerHTML = `
       <div class="receipt">
         <div class="text-center"><strong>${APP.escapeHtml(set.shopName)}</strong><br>${APP.escapeHtml(set.address || '')}<br>${APP.escapeHtml(set.phone || '')}</div>
@@ -2101,8 +2357,12 @@ PAGES.sales = async function (mount, session) {
         <div class="d-flex justify-content-between"><span>Discount</span><span>-${APP.fmt(s.discount)}</span></div>
         <div class="d-flex justify-content-between"><span>Tax</span><span>+${APP.fmt(s.tax)}</span></div>
         <div class="d-flex justify-content-between fw-bold"><span>TOTAL</span><span>${APP.fmt(s.total)}</span></div>
-        <div class="d-flex justify-content-between"><span>Paid (${s.paymentMethod})</span><span>${APP.fmt(s.paid)}</span></div>
+        ${s.walletApplied ? `<div class="d-flex justify-content-between"><span>Wallet Applied</span><span>-${APP.fmt(s.walletApplied)}</span></div>` : ''}
+        <div class="d-flex justify-content-between"><span>Tendered (${s.paymentMethod})</span><span>${APP.fmt(s.tendered != null ? s.tendered : s.paid)}</span></div>
+        ${acct ? `<div>Received in: ${APP.escapeHtml(acct.provider)} - ${APP.escapeHtml(acct.label)}</div>` : ''}
         <div class="d-flex justify-content-between"><span>Change</span><span>${APP.fmt(s.change)}</span></div>
+        ${s.addedToWallet ? `<div class="d-flex justify-content-between text-success"><span>Added to Wallet</span><span>${APP.fmt(s.addedToWallet)}</span></div>` : ''}
+        ${s.creditAdded ? `<div class="d-flex justify-content-between text-danger"><span>Added as Credit</span><span>${APP.fmt(s.creditAdded)}</span></div>` : ''}
         <hr>
         <div class="text-center small">${APP.escapeHtml(set.receiptFooter || '')}</div>
         <hr>
@@ -2571,7 +2831,8 @@ PAGES.mobilebanking = async function (mount, session) {
     bill: 'Utility Bill Payment',
     send: 'Send Money / Mobile Load',
     cashin: 'Cash In (Load Account)',
-    cashout: 'Cash Out (Withdraw)'
+    cashout: 'Cash Out (Withdraw)',
+    sale: 'POS Sale Payment Received'
   };
 
   mount.innerHTML = `
@@ -2621,10 +2882,20 @@ PAGES.mobilebanking = async function (mount, session) {
           <div class="card-header">Transaction History</div>
           <div class="card-body p-0" style="max-height: 560px; overflow-y:auto;">
             <table class="table table-sm mb-0">
-              <thead><tr><th>Date</th><th>Type</th><th>Account</th><th>Customer</th><th class="text-end">Amount</th><th class="text-end">Commission</th></tr></thead>
+              <thead><tr><th>Date</th><th>Type</th><th>Account</th><th>Customer</th><th class="text-end">Amount</th><th class="text-end">Commission</th><th class="text-end">Receipt</th></tr></thead>
               <tbody id="txnBody"></tbody>
             </table>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="mbReceiptModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header"><h6 class="modal-title">Transaction Receipt</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body" id="mbPrintArea"></div>
+          <div class="modal-footer"><button class="btn btn-brand" onclick="window.print()"><i class="fas fa-print me-1"></i>Print</button></div>
         </div>
       </div>
     </div>
@@ -2653,7 +2924,7 @@ PAGES.mobilebanking = async function (mount, session) {
     if (!acct) return 0;
     let bal = acct.openingBalance || 0;
     txns.filter(t => t.accountId === acctId).forEach(t => {
-      if (t.type === 'cashin') bal += t.amount;
+      if (t.type === 'cashin' || t.type === 'sale') bal += t.amount;
       else bal -= t.amount; // bill, send, cashout all reduce the mobile-account balance
     });
     return bal;
@@ -2698,8 +2969,43 @@ PAGES.mobilebanking = async function (mount, session) {
         <td class="small">${APP.escapeHtml(t.custName || '—')}${t.biller ? ' · ' + APP.escapeHtml(t.biller) : ''}</td>
         <td class="text-end">${APP.fmt(t.amount)}</td>
         <td class="text-end text-success">${t.commission ? '+' + APP.fmt(t.commission) : '—'}</td>
+        <td class="text-end"><button class="btn btn-sm btn-outline-secondary viewTxnBtn" data-id="${t.id}"><i class="fas fa-receipt me-1"></i>Print</button></td>
       </tr>`;
-    }).join('') : `<tr><td colspan="6" class="text-center text-muted py-4">No transactions recorded yet.</td></tr>`;
+    }).join('') : `<tr><td colspan="7" class="text-center text-muted py-4">No transactions recorded yet.</td></tr>`;
+    document.getElementById('txnBody').querySelectorAll('.viewTxnBtn').forEach(b => b.addEventListener('click', () => showTxnReceipt(Number(b.dataset.id))));
+  }
+
+  function showTxnReceipt(id) {
+    const t = txns.find(x => x.id === id);
+    if (!t) return;
+    const acct = accounts.find(a => a.id === t.accountId);
+    const settings = DB.getSettings();
+    document.getElementById('mbPrintArea').innerHTML = `
+      <div class="receipt">
+        <div class="text-center">
+          <strong>${APP.escapeHtml(settings.shopName)}</strong><br>
+          <span>${APP.escapeHtml(settings.address || '')}</span><br>
+          <span>${APP.escapeHtml(settings.phone || '')}</span>
+        </div>
+        <hr>
+        <div>Transaction: ${TYPE_LABELS[t.type] || t.type}</div>
+        <div>Date: ${APP.fmtDate(t.date)}</div>
+        <div>Handled by: ${APP.escapeHtml(t.userName || '')}</div>
+        <hr>
+        <div>Account: ${acct ? APP.escapeHtml(acct.provider + ' - ' + acct.label) : '—'}</div>
+        <div>Account No: ${acct ? APP.escapeHtml(acct.accountNumber) : '—'}</div>
+        ${t.biller ? `<div>Biller / Receiver: ${APP.escapeHtml(t.biller)}</div>` : ''}
+        ${t.custName ? `<div>Customer: ${APP.escapeHtml(t.custName)}${t.custPhone ? ' (' + APP.escapeHtml(t.custPhone) + ')' : ''}</div>` : ''}
+        ${t.note ? `<div>Note: ${APP.escapeHtml(t.note)}</div>` : ''}
+        <hr>
+        <div class="d-flex justify-content-between fw-bold"><span>Amount</span><span>${APP.fmt(t.amount)}</span></div>
+        ${t.commission ? `<div class="d-flex justify-content-between"><span>Your Commission</span><span>+${APP.fmt(t.commission)}</span></div>` : ''}
+        <hr>
+        <div class="text-center small">${APP.escapeHtml(settings.receiptFooter || '')}</div>
+        <hr>
+        <div class="text-center" style="font-size:.68rem;color:#666;">${APP.escapeHtml(APP.DEVELOPER_CREDIT)}</div>
+      </div>`;
+    new bootstrap.Modal(document.getElementById('mbReceiptModal')).show();
   }
 
   document.getElementById('saveTxnBtn').addEventListener('click', () => {
