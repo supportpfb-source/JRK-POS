@@ -1089,7 +1089,7 @@ PAGES.pos = async function (mount, session) {
             <button class="btn btn-sm btn-outline-danger" id="clearCartBtn"><i class="fas fa-trash"></i> Clear</button>
           </div>
           <div class="card-body">
-            <div id="cartItems" style="max-height: 300px; overflow-y:auto;"></div>
+            <div id="cartItems" style="max-height: 260px; overflow-y:auto;"></div>
             <div class="text-center text-muted py-4" id="emptyCartMsg">Cart is empty. Click a product to add it.</div>
 
             <hr>
@@ -1116,7 +1116,15 @@ PAGES.pos = async function (mount, session) {
             <div class="d-flex justify-content-between small text-muted"><span>Subtotal</span><span id="sumSubtotal">${APP.fmt(0)}</span></div>
             <div class="d-flex justify-content-between small text-muted"><span>Discount</span><span id="sumDiscount">- ${APP.fmt(0)}</span></div>
             <div class="d-flex justify-content-between small text-muted"><span>Tax</span><span id="sumTax">+ ${APP.fmt(0)}</span></div>
-            <div class="d-flex justify-content-between fs-5 fw-bold mt-1"><span>Total</span><span id="sumTotal">${APP.fmt(0)}</span></div>
+            <div class="d-flex justify-content-between fw-semibold mt-1"><span>Sale Total</span><span id="sumSaleTotal">${APP.fmt(0)}</span></div>
+
+            <div class="form-check mt-2 d-none" id="includeCreditWrap">
+              <input class="form-check-input" type="checkbox" id="includeCreditChk" checked>
+              <label class="form-check-label small text-danger" for="includeCreditChk" id="includeCreditLabel">Include previous credit due</label>
+            </div>
+            <div class="d-flex justify-content-between small text-danger d-none" id="creditIncludedRow"><span>Previous Credit Due</span><span id="sumCreditIncluded">${APP.fmt(0)}</span></div>
+
+            <div class="d-flex justify-content-between fs-5 fw-bold mt-1 pt-1 border-top"><span>Amount Due Now</span><span id="sumTotal">${APP.fmt(0)}</span></div>
 
             <div class="form-check mt-2 d-none" id="walletUseWrap">
               <input class="form-check-input" type="checkbox" id="useWalletChk">
@@ -1284,18 +1292,24 @@ PAGES.pos = async function (mount, session) {
     const cust = getSelectedCustomer();
     const box = document.getElementById('custInfoBox');
     const walletWrap = document.getElementById('walletUseWrap');
+    const creditWrap = document.getElementById('includeCreditWrap');
+
     if (!cust || cust.id === 1) {
       box.innerHTML = '';
       walletWrap.classList.add('d-none');
+      creditWrap.classList.add('d-none');
       document.getElementById('useWalletChk').checked = false;
+      recalc();
       return;
     }
+
     const wallet = cust.walletBalance || 0;
     const credit = cust.creditBalance || 0;
     let html = '';
     if (wallet > 0) html += `<span class="badge badge-stock-ok me-1"><i class="fas fa-wallet"></i> Wallet: ${APP.fmt(wallet)}</span>`;
     if (credit > 0) html += `<span class="badge badge-stock-low"><i class="fas fa-triangle-exclamation"></i> Owes: ${APP.fmt(credit)}</span>`;
     box.innerHTML = html;
+
     if (wallet > 0) {
       walletWrap.classList.remove('d-none');
       document.getElementById('walletUseLabel').textContent = `Use wallet balance (${APP.fmt(wallet)} available)`;
@@ -1303,6 +1317,16 @@ PAGES.pos = async function (mount, session) {
       walletWrap.classList.add('d-none');
       document.getElementById('useWalletChk').checked = false;
     }
+
+    if (credit > 0) {
+      creditWrap.classList.remove('d-none');
+      document.getElementById('includeCreditChk').checked = true;
+      document.getElementById('includeCreditLabel').textContent = `Include previous credit due (${APP.fmt(credit)}) in this bill`;
+    } else {
+      creditWrap.classList.add('d-none');
+      document.getElementById('includeCreditChk').checked = false;
+    }
+    recalc();
   }
 
   function recalc() {
@@ -1311,20 +1335,33 @@ PAGES.pos = async function (mount, session) {
     const taxPct = Number(document.getElementById('taxInput').value) || 0;
     const taxable = Math.max(subtotal - discount, 0);
     const tax = taxable * (taxPct / 100);
-    const total = taxable + tax;
-    const tendered = Number(document.getElementById('amountPaid').value) || 0;
+    const saleTotal = taxable + tax;
 
     const cust = getSelectedCustomer();
-    const useWallet = document.getElementById('useWalletChk').checked && cust && cust.id !== 1;
-    const walletApplied = useWallet ? Math.min(cust.walletBalance || 0, total) : 0;
+    const canUseCreditWallet = !!(cust && cust.id !== 1);
+    const prevCredit = canUseCreditWallet ? (cust.creditBalance || 0) : 0;
+    const includeCreditChk = document.getElementById('includeCreditChk');
+    const includeCredit = prevCredit > 0 && includeCreditChk && includeCreditChk.checked;
+    const creditIncluded = includeCredit ? prevCredit : 0;
+    const grandTotal = saleTotal + creditIncluded;
+
+    const tendered = Number(document.getElementById('amountPaid').value) || 0;
+    const useWallet = document.getElementById('useWalletChk').checked && canUseCreditWallet;
+    const walletApplied = useWallet ? Math.min(cust.walletBalance || 0, grandTotal) : 0;
 
     const effectivePaid = tendered + walletApplied;
-    const diff = effectivePaid - total; // negative = shortfall (credit), positive = surplus (change/wallet-add)
+    const diff = effectivePaid - grandTotal; // negative = shortfall, positive = surplus
 
     document.getElementById('sumSubtotal').textContent = APP.fmt(subtotal);
     document.getElementById('sumDiscount').textContent = '- ' + APP.fmt(discount);
     document.getElementById('sumTax').textContent = '+ ' + APP.fmt(tax);
-    document.getElementById('sumTotal').textContent = APP.fmt(total);
+    document.getElementById('sumSaleTotal').textContent = APP.fmt(saleTotal);
+
+    const creditRow = document.getElementById('creditIncludedRow');
+    if (creditIncluded > 0) { creditRow.classList.remove('d-none'); document.getElementById('sumCreditIncluded').textContent = '+ ' + APP.fmt(creditIncluded); }
+    else creditRow.classList.add('d-none');
+
+    document.getElementById('sumTotal').textContent = APP.fmt(grandTotal);
 
     const walletRow = document.getElementById('walletAppliedRow');
     if (walletApplied > 0) { walletRow.classList.remove('d-none'); document.getElementById('sumWalletApplied').textContent = '- ' + APP.fmt(walletApplied); }
@@ -1332,11 +1369,11 @@ PAGES.pos = async function (mount, session) {
 
     const addToWalletWrap = document.getElementById('addToWalletWrap');
     const creditBox = document.getElementById('creditWarningBox');
-    const canUseCreditWallet = cust && cust.id !== 1;
 
     if (diff > 0) {
       document.getElementById('changeDue').textContent = APP.fmt(diff);
-      if (canUseCreditWallet) { addToWalletWrap.classList.remove('d-none'); } else { addToWalletWrap.classList.add('d-none'); document.getElementById('addToWalletChk').checked = false; }
+      if (canUseCreditWallet) addToWalletWrap.classList.remove('d-none');
+      else { addToWalletWrap.classList.add('d-none'); document.getElementById('addToWalletChk').checked = false; }
       creditBox.classList.add('d-none');
     } else if (diff < 0) {
       document.getElementById('changeDue').textContent = APP.fmt(0);
@@ -1344,7 +1381,7 @@ PAGES.pos = async function (mount, session) {
       document.getElementById('addToWalletChk').checked = false;
       creditBox.classList.remove('d-none');
       creditBox.innerHTML = canUseCreditWallet
-        ? `<i class="fas fa-triangle-exclamation me-1"></i>Rs ${Math.abs(diff).toLocaleString()} short — this will be added as <strong>credit</strong> for ${APP.escapeHtml(cust.name)}.`
+        ? `<i class="fas fa-triangle-exclamation me-1"></i>Rs ${Math.abs(diff).toLocaleString()} short — this will remain / become <strong>credit</strong> for ${APP.escapeHtml(cust.name)}.`
         : `<i class="fas fa-triangle-exclamation me-1"></i>Amount tendered is less than the total. Select a registered customer to track this as credit, or collect the full amount.`;
     } else {
       document.getElementById('changeDue').textContent = APP.fmt(0);
@@ -1355,7 +1392,7 @@ PAGES.pos = async function (mount, session) {
 
     document.getElementById('checkoutBtn').disabled = cart.length === 0;
 
-    return { subtotal, discount, tax, total, tendered, walletApplied, effectivePaid, diff };
+    return { subtotal, discount, tax, saleTotal, prevCredit, includeCredit, creditIncluded, grandTotal, tendered, walletApplied, effectivePaid, diff };
   }
 
   function renderCustomers() {
@@ -1390,7 +1427,8 @@ PAGES.pos = async function (mount, session) {
   document.getElementById('taxInput').addEventListener('input', recalc);
   document.getElementById('amountPaid').addEventListener('input', recalc);
   document.getElementById('useWalletChk').addEventListener('change', recalc);
-  document.getElementById('customerSelect').addEventListener('change', () => { updateCustomerInfoPanel(); recalc(); });
+  document.getElementById('includeCreditChk').addEventListener('change', recalc);
+  document.getElementById('customerSelect').addEventListener('change', updateCustomerInfoPanel);
   document.getElementById('paymentMethod').addEventListener('change', updatePaymentMethodUI);
 
   document.getElementById('addCustomerBtn').addEventListener('click', () => {
@@ -1417,13 +1455,13 @@ PAGES.pos = async function (mount, session) {
     if (cart.length === 0) return;
 
     const cust = getSelectedCustomer();
-    const canUseCreditWallet = cust && cust.id !== 1;
+    const canUseCreditWallet = !!(cust && cust.id !== 1);
 
     if (totals.diff < 0) {
       if (!canUseCreditWallet) {
         if (!APP.confirmAction('Amount tendered is less than the total and no registered customer is selected, so this shortfall will not be tracked. Continue anyway?')) return;
       } else {
-        if (!APP.confirmAction(`Rs ${Math.abs(totals.diff).toLocaleString()} will be added as credit for ${cust.name}. Continue?`)) return;
+        if (!APP.confirmAction(`Rs ${Math.abs(totals.diff).toLocaleString()} will remain as credit for ${cust.name}. Continue?`)) return;
       }
     }
 
@@ -1449,20 +1487,27 @@ PAGES.pos = async function (mount, session) {
     });
     DB.saveProducts(products);
 
-    const creditAdded = totals.diff < 0 && canUseCreditWallet ? Math.abs(totals.diff) : 0;
     const addedToWallet = addToWallet ? totals.diff : 0;
     const changeReturned = (!addToWallet && totals.diff > 0) ? totals.diff : 0;
 
-    // Update customer wallet/credit balances
+    // Unified credit settlement: whatever isn't covered by payment/wallet becomes (or remains) credit.
+    let newCreditBalance = totals.prevCredit;
+    if (canUseCreditWallet) {
+      if (totals.includeCredit) {
+        newCreditBalance = Math.max(totals.grandTotal - totals.effectivePaid, 0);
+      } else {
+        const shortfallThisSale = Math.max(totals.saleTotal - totals.effectivePaid, 0);
+        newCreditBalance = totals.prevCredit + shortfallThisSale;
+      }
+    }
+
     if (canUseCreditWallet) {
       customers = customers.map(c => {
         if (c.id !== cust.id) return c;
         let wallet = c.walletBalance || 0;
-        let credit = c.creditBalance || 0;
         if (totals.walletApplied > 0) wallet -= totals.walletApplied;
         if (addedToWallet > 0) wallet += addedToWallet;
-        if (creditAdded > 0) credit += creditAdded;
-        return { ...c, walletBalance: Math.max(wallet, 0), creditBalance: Math.max(credit, 0) };
+        return { ...c, walletBalance: Math.max(wallet, 0), creditBalance: newCreditBalance };
       });
       DB.saveCustomers(customers);
     }
@@ -1477,12 +1522,15 @@ PAGES.pos = async function (mount, session) {
       subtotal: totals.subtotal,
       discount: totals.discount,
       tax: totals.tax,
-      total: totals.total,
-      tendered: totals.tendered,
+      total: totals.saleTotal, // items-only total, used for revenue reporting
+      grandTotalCharged: totals.grandTotal,
+      prevCreditIncluded: totals.creditIncluded,
+      creditBefore: totals.prevCredit,
+      creditAfter: newCreditBalance,
       walletApplied: totals.walletApplied,
+      tendered: totals.tendered,
       paid: totals.effectivePaid,
       change: changeReturned,
-      creditAdded,
       addedToWallet,
       paymentMethod,
       mbAccountId,
@@ -1515,7 +1563,7 @@ PAGES.pos = async function (mount, session) {
     const sales = DB.getSales();
     sales.push(sale);
     DB.saveSales(sales);
-    DB.logActivity(session.fullName, 'Sale', `${sale.invoiceNo} — ${APP.fmt(sale.total)}`);
+    DB.logActivity(session.fullName, 'Sale', `${sale.invoiceNo} — ${APP.fmt(sale.grandTotalCharged)}`);
 
     showReceipt(sale);
 
@@ -1554,13 +1602,15 @@ PAGES.pos = async function (mount, session) {
         <div class="d-flex justify-content-between"><span>Subtotal</span><span>${APP.fmt(sale.subtotal)}</span></div>
         <div class="d-flex justify-content-between"><span>Discount</span><span>-${APP.fmt(sale.discount)}</span></div>
         <div class="d-flex justify-content-between"><span>Tax</span><span>+${APP.fmt(sale.tax)}</span></div>
-        <div class="d-flex justify-content-between fw-bold"><span>TOTAL</span><span>${APP.fmt(sale.total)}</span></div>
+        <div class="d-flex justify-content-between fw-semibold"><span>Sale Total</span><span>${APP.fmt(sale.total)}</span></div>
+        ${sale.prevCreditIncluded ? `<div class="d-flex justify-content-between text-danger"><span>Previous Credit Included</span><span>+${APP.fmt(sale.prevCreditIncluded)}</span></div>` : ''}
+        <div class="d-flex justify-content-between fw-bold"><span>AMOUNT DUE</span><span>${APP.fmt(sale.grandTotalCharged)}</span></div>
         ${sale.walletApplied ? `<div class="d-flex justify-content-between"><span>Wallet Applied</span><span>-${APP.fmt(sale.walletApplied)}</span></div>` : ''}
         <div class="d-flex justify-content-between"><span>Tendered (${sale.paymentMethod})</span><span>${APP.fmt(sale.tendered)}</span></div>
         ${acct ? `<div>Received in: ${APP.escapeHtml(acct.provider)} - ${APP.escapeHtml(acct.label)}</div>` : ''}
         <div class="d-flex justify-content-between"><span>Change</span><span>${APP.fmt(sale.change)}</span></div>
         ${sale.addedToWallet ? `<div class="d-flex justify-content-between text-success"><span>Added to Wallet</span><span>${APP.fmt(sale.addedToWallet)}</span></div>` : ''}
-        ${sale.creditAdded ? `<div class="d-flex justify-content-between text-danger"><span>Added as Credit</span><span>${APP.fmt(sale.creditAdded)}</span></div>` : ''}
+        ${sale.creditAfter ? `<div class="d-flex justify-content-between text-danger"><span>Remaining Credit</span><span>${APP.fmt(sale.creditAfter)}</span></div>` : (sale.creditBefore ? `<div class="text-success small">✓ All previous credit cleared</div>` : '')}
         <hr>
         <div class="text-center small">${APP.escapeHtml(s.receiptFooter || '')}</div>
         <hr>
@@ -2356,13 +2406,15 @@ PAGES.sales = async function (mount, session) {
         <div class="d-flex justify-content-between"><span>Subtotal</span><span>${APP.fmt(s.subtotal)}</span></div>
         <div class="d-flex justify-content-between"><span>Discount</span><span>-${APP.fmt(s.discount)}</span></div>
         <div class="d-flex justify-content-between"><span>Tax</span><span>+${APP.fmt(s.tax)}</span></div>
-        <div class="d-flex justify-content-between fw-bold"><span>TOTAL</span><span>${APP.fmt(s.total)}</span></div>
+        <div class="d-flex justify-content-between fw-semibold"><span>Sale Total</span><span>${APP.fmt(s.total)}</span></div>
+        ${s.prevCreditIncluded ? `<div class="d-flex justify-content-between text-danger"><span>Previous Credit Included</span><span>+${APP.fmt(s.prevCreditIncluded)}</span></div>` : ''}
+        <div class="d-flex justify-content-between fw-bold"><span>AMOUNT DUE</span><span>${APP.fmt(s.grandTotalCharged != null ? s.grandTotalCharged : s.total)}</span></div>
         ${s.walletApplied ? `<div class="d-flex justify-content-between"><span>Wallet Applied</span><span>-${APP.fmt(s.walletApplied)}</span></div>` : ''}
         <div class="d-flex justify-content-between"><span>Tendered (${s.paymentMethod})</span><span>${APP.fmt(s.tendered != null ? s.tendered : s.paid)}</span></div>
         ${acct ? `<div>Received in: ${APP.escapeHtml(acct.provider)} - ${APP.escapeHtml(acct.label)}</div>` : ''}
         <div class="d-flex justify-content-between"><span>Change</span><span>${APP.fmt(s.change)}</span></div>
         ${s.addedToWallet ? `<div class="d-flex justify-content-between text-success"><span>Added to Wallet</span><span>${APP.fmt(s.addedToWallet)}</span></div>` : ''}
-        ${s.creditAdded ? `<div class="d-flex justify-content-between text-danger"><span>Added as Credit</span><span>${APP.fmt(s.creditAdded)}</span></div>` : ''}
+        ${s.creditAfter ? `<div class="d-flex justify-content-between text-danger"><span>Remaining Credit</span><span>${APP.fmt(s.creditAfter)}</span></div>` : (s.creditBefore ? `<div class="text-success small">✓ All previous credit cleared</div>` : '')}
         <hr>
         <div class="text-center small">${APP.escapeHtml(set.receiptFooter || '')}</div>
         <hr>
