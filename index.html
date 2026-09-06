@@ -1110,11 +1110,11 @@ PAGES.pos = async function (mount, session) {
             <div class="row g-2 mb-2">
               <div class="col-6">
                 <label class="form-label small">Discount (${APP.fmt(0).split(' ')[0]})</label>
-                <input type="number" min="0" class="form-control" id="discountInput" value="0">
+                <input type="number" min="0" class="form-control" id="discountInput" placeholder="0">
               </div>
               <div class="col-6">
                 <label class="form-label small">Tax %</label>
-                <input type="number" min="0" class="form-control" id="taxInput" value="${settings.taxPercent || 0}">
+                <input type="number" min="0" class="form-control" id="taxInput" placeholder="0">
               </div>
             </div>
 
