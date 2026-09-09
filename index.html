@@ -201,8 +201,8 @@ body {
 .receipt hr { border-top: 1px dashed #999; }
 @media print {
   body * { visibility: hidden; }
-  #printArea, #printArea * { visibility: visible; }
-  #printArea { position: absolute; top: 0; left: 0; width: 100%; }
+  #printArea, #printArea *, #mbPrintArea, #mbPrintArea * { visibility: visible; }
+  #printArea, #mbPrintArea { position: absolute; top: 0; left: 0; width: 100%; }
 }
 
 /* ---------- Responsive ---------- */
@@ -286,7 +286,10 @@ const DB = (() => {
     session: 'pos_session',
     activity: 'pos_activity',
     mbAccounts: 'pos_mb_accounts',
-    mbTransactions: 'pos_mb_transactions'
+    mbTransactions: 'pos_mb_transactions',
+    attendance: 'pos_attendance',
+    salaryDeductions: 'pos_salary_deductions',
+    customRoles: 'pos_custom_roles'
   };
 
   function read(key, fallback) {
@@ -430,10 +433,15 @@ const DB = (() => {
         currency: 'Rs',
         taxPercent: 0,
         receiptFooter: 'Thank you for shopping with us! Exchange within 3 days with receipt.',
-        lowStockAlert: true
+        lowStockAlert: true,
+        shiftStartTime: '09:00',
+        lateGraceMinutes: 15
       };
       write(KEYS.settings, settings);
     }
+    if (!read(KEYS.attendance, null)) write(KEYS.attendance, []);
+    if (!read(KEYS.salaryDeductions, null)) write(KEYS.salaryDeductions, []);
+    if (!read(KEYS.customRoles, null)) write(KEYS.customRoles, []);
   }
 
   return {
@@ -459,7 +467,13 @@ const DB = (() => {
     getMbAccounts: () => read(KEYS.mbAccounts, []),
     saveMbAccounts: (v) => write(KEYS.mbAccounts, v),
     getMbTransactions: () => read(KEYS.mbTransactions, []),
-    saveMbTransactions: (v) => write(KEYS.mbTransactions, v)
+    saveMbTransactions: (v) => write(KEYS.mbTransactions, v),
+    getAttendance: () => read(KEYS.attendance, []),
+    saveAttendance: (v) => write(KEYS.attendance, v),
+    getSalaryDeductions: () => read(KEYS.salaryDeductions, []),
+    saveSalaryDeductions: (v) => write(KEYS.salaryDeductions, v),
+    getCustomRoles: () => read(KEYS.customRoles, []),
+    saveCustomRoles: (v) => write(KEYS.customRoles, v)
   };
 })();
 
@@ -639,14 +653,20 @@ const LICENSE = (() => {
 const AUTH = (() => {
   const SESSION_KEY = DB.KEYS.session;
 
-  // Central permission map. Add new pages/actions here only.
+  // Central permission map for the three built-in roles. Add new
+  // pages/actions here only. Custom roles (created by the Administrator
+  // under Users & Roles) are stored separately in DB.getCustomRoles().
   const PERMISSIONS = {
-    admin:   ['dashboard', 'pos', 'products', 'customers', 'purchases', 'sales', 'mobilebanking', 'reports', 'users', 'settings'],
-    manager: ['dashboard', 'pos', 'products', 'customers', 'purchases', 'sales', 'mobilebanking', 'reports'],
-    cashier: ['dashboard', 'pos', 'customers', 'sales', 'mobilebanking']
+    admin:   ['dashboard', 'pos', 'products', 'customers', 'purchases', 'sales', 'mobilebanking', 'attendance', 'reports', 'users', 'settings'],
+    manager: ['dashboard', 'pos', 'products', 'customers', 'purchases', 'sales', 'mobilebanking', 'attendance', 'reports'],
+    cashier: ['dashboard', 'pos', 'customers', 'sales', 'mobilebanking', 'attendance']
   };
 
   const ROLE_LABELS = { admin: 'Administrator', manager: 'Manager', cashier: 'Cashier' };
+
+  function getCustomRole(roleKey) {
+    return DB.getCustomRoles().find(r => r.key === roleKey);
+  }
 
   function getSession() {
     try {
@@ -687,7 +707,29 @@ const AUTH = (() => {
   }
 
   function can(role, page) {
-    return (PERMISSIONS[role] || []).includes(page);
+    if (PERMISSIONS[role]) return PERMISSIONS[role].includes(page);
+    const custom = getCustomRole(role);
+    return custom ? (custom.pages || []).includes(page) : false;
+  }
+
+  // Built-in roles (admin/manager/cashier) always get full read-write access.
+  // Only a custom role explicitly marked "read only" is locked down.
+  function isReadOnly(role) {
+    if (PERMISSIONS[role]) return false;
+    const custom = getCustomRole(role);
+    return custom ? !!custom.readOnly : false;
+  }
+
+  function roleLabel(role) {
+    if (ROLE_LABELS[role]) return ROLE_LABELS[role];
+    const custom = getCustomRole(role);
+    return custom ? custom.label : role;
+  }
+
+  function allRoleOptions() {
+    const builtIn = Object.keys(PERMISSIONS).map(key => ({ key, label: ROLE_LABELS[key], builtIn: true }));
+    const custom = DB.getCustomRoles().map(r => ({ key: r.key, label: r.label, builtIn: false }));
+    return [...builtIn, ...custom];
   }
 
   // Call at top of every protected page: guard('pos')
@@ -707,7 +749,7 @@ const AUTH = (() => {
     return session;
   }
 
-  return { getSession, setSession, logout, login, can, guard, PERMISSIONS, ROLE_LABELS };
+  return { getSession, setSession, logout, login, can, guard, isReadOnly, roleLabel, allRoleOptions, PERMISSIONS, ROLE_LABELS };
 })();
 
 </script>
@@ -730,6 +772,7 @@ const APP = (() => {
     purchases: 'Purchases & Suppliers',
     sales: 'Sales History',
     mobilebanking: 'Mobile Banking Services',
+    attendance: 'Staff Attendance',
     reports: 'Reports',
     users: 'Users & Roles',
     settings: 'Settings'
@@ -743,6 +786,7 @@ const APP = (() => {
     { page: 'purchases', icon: 'fa-truck',        label: 'Purchases & Suppliers' },
     { page: 'sales',     icon: 'fa-receipt',      label: 'Sales History' },
     { page: 'mobilebanking', icon: 'fa-wallet', label: 'Mobile Banking' },
+    { page: 'attendance', icon: 'fa-user-clock', label: 'Staff Attendance' },
     { page: 'reports',   icon: 'fa-chart-line',     label: 'Reports' },
     { page: 'users',     icon: 'fa-id-badge', label: 'Users & Roles' },
     { page: 'settings',  icon: 'fa-gear',         label: 'Settings' }
@@ -817,7 +861,7 @@ const APP = (() => {
         <div class="nav flex-column flex-grow-1" id="sidebarNav">${navHtml}</div>
         <div class="sidebar-user border-top pt-3 mt-3">
           <div class="fw-semibold small text-truncate">${escapeHtml(session.fullName)}</div>
-          <div class="text-uppercase role-pill role-${session.role}">${AUTH.ROLE_LABELS[session.role]}</div>
+          <div class="text-uppercase role-pill role-${session.role}">${AUTH.roleLabel(session.role)}</div>
           <button class="btn btn-sm btn-outline-light w-100 mt-2" id="logoutBtn"><i class="fas fa-right-from-bracket me-1"></i>Logout</button>
         </div>
         <div class="sidebar-credit text-center mt-3"><i class="fas fa-code me-1"></i>${DEVELOPER_CREDIT}</div>
@@ -898,9 +942,32 @@ const APP = (() => {
     autoBackupIfNeeded(session);
     if (PAGES[page]) {
       await PAGES[page](mount, session);
+      if (mount && AUTH.isReadOnly(session.role)) applyReadOnlyLock(mount);
     } else if (mount) {
       mount.innerHTML = '<div class="text-center text-muted py-5">This page is not available.</div>';
     }
+  }
+
+  // Locks down a read-only role's page: disables anything that could change
+  // data, while leaving search/filter boxes and explicitly-tagged safe
+  // controls (view/print/receipt buttons, tabs, etc.) usable.
+  function applyReadOnlyLock(mount) {
+    if (document.getElementById('readOnlyBanner') === null) {
+      const banner = document.createElement('div');
+      banner.id = 'readOnlyBanner';
+      banner.className = 'alert alert-secondary py-2 small mb-3';
+      banner.innerHTML = '<i class="fas fa-eye me-1"></i>Read-only access — you can view this page but cannot make changes.';
+      mount.insertBefore(banner, mount.firstChild);
+    }
+    mount.querySelectorAll('button').forEach(b => {
+      if (b.dataset.roSafe === 'true') return;
+      b.disabled = true;
+    });
+    mount.querySelectorAll('input, select, textarea').forEach(el => {
+      if (el.dataset.roSafe === 'true') return;
+      if (el.tagName !== 'BUTTON' && el.id && /search|filter|from|to/i.test(el.id) && el.type !== 'checkbox') return;
+      el.disabled = true;
+    });
   }
 
   async function initPage(page, title) {
@@ -951,10 +1018,161 @@ const APP = (() => {
     }
   }
 
+  // ---- Shared photo capture (camera or file upload), used by POS, Mobile
+  // Banking and Products. Returns a Promise resolving to a resized JPEG
+  // data URL, or null if the user cancelled. Images are downscaled before
+  // being returned so they stay small in localStorage.
+  let captureInited = false;
+  let captureResolve = null;
+  let captureStream = null;
+  let captureResultDataUrl = null;
+
+  function ensureCaptureModal() {
+    if (captureInited) return;
+    captureInited = true;
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `
+      <div class="modal fade" id="imageCaptureModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header"><h6 class="modal-title" id="captureModalTitle">Capture Photo</h6><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body text-center">
+              <video id="captureVideo" autoplay playsinline style="width:100%;max-height:280px;background:#000;border-radius:8px;display:none;"></video>
+              <img id="capturePreviewImg" style="max-width:100%;max-height:280px;display:none;border-radius:8px;">
+              <div id="captureNoCamMsg" class="text-muted small py-4 d-none"><i class="fas fa-circle-info me-1"></i>Camera not available here — please upload a photo instead.</div>
+              <div class="d-flex flex-wrap gap-2 justify-content-center mt-3">
+                <button type="button" class="btn btn-outline-secondary btn-sm" id="startCamBtn"><i class="fas fa-camera me-1"></i>Start Camera</button>
+                <button type="button" class="btn btn-brand btn-sm d-none" id="snapBtn"><i class="fas fa-circle-check me-1"></i>Capture</button>
+                <button type="button" class="btn btn-outline-secondary btn-sm d-none" id="retakeBtn"><i class="fas fa-rotate me-1"></i>Retake</button>
+                <label class="btn btn-outline-secondary btn-sm mb-0">
+                  <i class="fas fa-upload me-1"></i>Upload Photo
+                  <input type="file" accept="image/*" id="captureFileInput" class="d-none">
+                </label>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+              <button type="button" class="btn btn-brand d-none" id="useSaveBtn"><i class="fas fa-check me-1"></i>Use This Photo</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap.firstElementChild);
+
+    const modalEl = document.getElementById('imageCaptureModal');
+    const video = document.getElementById('captureVideo');
+    const previewImg = document.getElementById('capturePreviewImg');
+    const noCamMsg = document.getElementById('captureNoCamMsg');
+    const startBtn = document.getElementById('startCamBtn');
+    const snapBtn = document.getElementById('snapBtn');
+    const retakeBtn = document.getElementById('retakeBtn');
+    const fileInput = document.getElementById('captureFileInput');
+    const useSaveBtn = document.getElementById('useSaveBtn');
+
+    function stopStream() {
+      if (captureStream) { captureStream.getTracks().forEach(t => t.stop()); captureStream = null; }
+    }
+
+    function resizeToDataUrl(source, maxDim) {
+      const tmp = document.createElement('canvas');
+      const w = source.videoWidth || source.naturalWidth || source.width;
+      const h = source.videoHeight || source.naturalHeight || source.height;
+      const scale = Math.min(1, maxDim / Math.max(w, h));
+      tmp.width = Math.max(1, Math.round(w * scale));
+      tmp.height = Math.max(1, Math.round(h * scale));
+      tmp.getContext('2d').drawImage(source, 0, 0, tmp.width, tmp.height);
+      return tmp.toDataURL('image/jpeg', 0.7);
+    }
+
+    function resetUI() {
+      video.style.display = 'none';
+      previewImg.style.display = 'none';
+      noCamMsg.classList.add('d-none');
+      startBtn.classList.remove('d-none');
+      snapBtn.classList.add('d-none');
+      retakeBtn.classList.add('d-none');
+      useSaveBtn.classList.add('d-none');
+      fileInput.value = '';
+      captureResultDataUrl = null;
+      stopStream();
+    }
+
+    startBtn.addEventListener('click', async () => {
+      try {
+        captureStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+        video.srcObject = captureStream;
+        video.style.display = 'block';
+        startBtn.classList.add('d-none');
+        snapBtn.classList.remove('d-none');
+        noCamMsg.classList.add('d-none');
+      } catch (e) {
+        noCamMsg.classList.remove('d-none');
+      }
+    });
+
+    snapBtn.addEventListener('click', () => {
+      captureResultDataUrl = resizeToDataUrl(video, 360);
+      previewImg.src = captureResultDataUrl;
+      previewImg.style.display = 'block';
+      video.style.display = 'none';
+      stopStream();
+      snapBtn.classList.add('d-none');
+      retakeBtn.classList.remove('d-none');
+      useSaveBtn.classList.remove('d-none');
+    });
+
+    retakeBtn.addEventListener('click', () => {
+      previewImg.style.display = 'none';
+      useSaveBtn.classList.add('d-none');
+      retakeBtn.classList.add('d-none');
+      startBtn.classList.remove('d-none');
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          captureResultDataUrl = resizeToDataUrl(img, 360);
+          previewImg.src = captureResultDataUrl;
+          previewImg.style.display = 'block';
+          video.style.display = 'none';
+          startBtn.classList.add('d-none');
+          snapBtn.classList.add('d-none');
+          retakeBtn.classList.remove('d-none');
+          useSaveBtn.classList.remove('d-none');
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+
+    useSaveBtn.addEventListener('click', () => { bootstrap.Modal.getInstance(modalEl).hide(); });
+
+    modalEl.addEventListener('hidden.bs.modal', () => {
+      stopStream();
+      if (captureResolve) { captureResolve(captureResultDataUrl); captureResolve = null; }
+    });
+
+    modalEl.addEventListener('show.bs.modal', resetUI);
+  }
+
+  function captureImage(title) {
+    ensureCaptureModal();
+    document.getElementById('captureModalTitle').textContent = title || 'Capture Photo';
+    return new Promise((resolve) => {
+      captureResolve = resolve;
+      new bootstrap.Modal(document.getElementById('imageCaptureModal')).show();
+    });
+  }
+
   return {
     NAV_ITEMS, DEVELOPER_CREDIT, fmt, fmtDate, escapeHtml, toast, confirmAction,
     initPage, setTitle, buildBackupPayload, autoBackupIfNeeded,
-    navigateTo, showLogin, showApp, boot, getCurrentPage: () => currentPage
+    navigateTo, showLogin, showApp, boot, getCurrentPage: () => currentPage,
+    captureImage
   };
 })();
 
@@ -1070,6 +1288,7 @@ PAGES.pos = async function (mount, session) {
   let cart = []; // {productId, name, price, qty, stock}
   let activeCategory = 'all';
   let searchTerm = '';
+  let currentCustPhoto = null; // photo for this sale (pre-filled from customer record, or freshly captured)
 
   mount.innerHTML = `
     <div class="row g-3">
@@ -1105,16 +1324,20 @@ PAGES.pos = async function (mount, session) {
                 <button class="btn btn-outline-secondary" type="button" id="addCustomerBtn" title="Add new customer"><i class="fas fa-user-plus"></i></button>
               </div>
               <div class="small mt-1" id="custInfoBox"></div>
+              <div class="d-flex align-items-center gap-2 mt-2">
+                <img id="custPhotoThumb" src="" style="width:36px;height:36px;object-fit:cover;border-radius:50%;display:none;border:1px solid #e5e7f0;">
+                <button class="btn btn-outline-secondary btn-sm" type="button" id="custCaptureBtn"><i class="fas fa-camera me-1"></i>Customer Photo <span class="text-muted">(optional)</span></button>
+              </div>
             </div>
 
             <div class="row g-2 mb-2">
               <div class="col-6">
                 <label class="form-label small">Discount (${APP.fmt(0).split(' ')[0]})</label>
-                <input type="number" min="0" class="form-control" id="discountInput" placeholder="0">
+                <input type="number" min="0" class="form-control" id="discountInput" value="0">
               </div>
               <div class="col-6">
                 <label class="form-label small">Tax %</label>
-                <input type="number" min="0" class="form-control" id="taxInput" placeholder="0">
+                <input type="number" min="0" class="form-control" id="taxInput" value="${settings.taxPercent || 0}">
               </div>
             </div>
 
@@ -1129,13 +1352,13 @@ PAGES.pos = async function (mount, session) {
             </div>
             <div class="d-flex justify-content-between small text-danger d-none" id="creditIncludedRow"><span>Previous Credit Due</span><span id="sumCreditIncluded">${APP.fmt(0)}</span></div>
 
-            <div class="d-flex justify-content-between fs-5 fw-bold mt-1 pt-1 border-top"><span>Amount Due Now</span><span id="sumTotal">${APP.fmt(0)}</span></div>
-
             <div class="form-check mt-2 d-none" id="walletUseWrap">
               <input class="form-check-input" type="checkbox" id="useWalletChk">
               <label class="form-check-label small" for="useWalletChk" id="walletUseLabel">Use customer wallet balance</label>
             </div>
             <div class="d-flex justify-content-between small text-success d-none" id="walletAppliedRow"><span>Wallet Applied</span><span id="sumWalletApplied">${APP.fmt(0)}</span></div>
+
+            <div class="d-flex justify-content-between fs-5 fw-bold mt-1 pt-1 border-top"><span>Amount Due Now</span><span id="sumTotal">${APP.fmt(0)}</span></div>
 
             <div class="row g-2 mt-2">
               <div class="col-6">
@@ -1231,6 +1454,7 @@ PAGES.pos = async function (mount, session) {
       return `
       <div class="col-6 col-md-4 col-xl-3">
         <button class="pos-product-btn w-100" data-id="${p.id}" ${remaining <= 0 ? 'disabled' : ''}>
+          ${p.image ? `<img src="${p.image}" style="width:100%;height:70px;object-fit:cover;border-radius:8px;margin-bottom:.4rem;">` : `<div style="width:100%;height:70px;border-radius:8px;background:#f4f5fb;color:#c7c9de;display:flex;align-items:center;justify-content:center;font-size:1.4rem;margin-bottom:.4rem;"><i class="fas fa-box"></i></div>`}
           <div class="fw-semibold small">${APP.escapeHtml(p.name)}</div>
           <div class="text-muted small">${APP.escapeHtml(p.brand || '')}</div>
           <div class="d-flex justify-content-between align-items-center mt-2">
@@ -1293,11 +1517,20 @@ PAGES.pos = async function (mount, session) {
     return customers.find(c => c.id === id) || null;
   }
 
+  function updateCustomerThumb() {
+    const thumb = document.getElementById('custPhotoThumb');
+    if (currentCustPhoto) { thumb.src = currentCustPhoto; thumb.style.display = 'inline-block'; }
+    else thumb.style.display = 'none';
+  }
+
   function updateCustomerInfoPanel() {
     const cust = getSelectedCustomer();
     const box = document.getElementById('custInfoBox');
     const walletWrap = document.getElementById('walletUseWrap');
     const creditWrap = document.getElementById('includeCreditWrap');
+
+    currentCustPhoto = (cust && cust.photo) ? cust.photo : null;
+    updateCustomerThumb();
 
     if (!cust || cust.id === 1) {
       box.innerHTML = '';
@@ -1317,6 +1550,7 @@ PAGES.pos = async function (mount, session) {
 
     if (wallet > 0) {
       walletWrap.classList.remove('d-none');
+      document.getElementById('useWalletChk').checked = true;
       document.getElementById('walletUseLabel').textContent = `Use wallet balance (${APP.fmt(wallet)} available)`;
     } else {
       walletWrap.classList.add('d-none');
@@ -1366,11 +1600,12 @@ PAGES.pos = async function (mount, session) {
     if (creditIncluded > 0) { creditRow.classList.remove('d-none'); document.getElementById('sumCreditIncluded').textContent = '+ ' + APP.fmt(creditIncluded); }
     else creditRow.classList.add('d-none');
 
-    document.getElementById('sumTotal').textContent = APP.fmt(grandTotal);
-
     const walletRow = document.getElementById('walletAppliedRow');
     if (walletApplied > 0) { walletRow.classList.remove('d-none'); document.getElementById('sumWalletApplied').textContent = '- ' + APP.fmt(walletApplied); }
     else walletRow.classList.add('d-none');
+
+    const netDue = grandTotal - walletApplied;
+    document.getElementById('sumTotal').textContent = APP.fmt(netDue);
 
     const addToWalletWrap = document.getElementById('addToWalletWrap');
     const creditBox = document.getElementById('creditWarningBox');
@@ -1435,6 +1670,21 @@ PAGES.pos = async function (mount, session) {
   document.getElementById('includeCreditChk').addEventListener('change', recalc);
   document.getElementById('customerSelect').addEventListener('change', updateCustomerInfoPanel);
   document.getElementById('paymentMethod').addEventListener('change', updatePaymentMethodUI);
+
+  document.getElementById('custCaptureBtn').addEventListener('click', async () => {
+    const dataUrl = await APP.captureImage('Customer Photo');
+    if (!dataUrl) return;
+    currentCustPhoto = dataUrl;
+    updateCustomerThumb();
+    const cust = getSelectedCustomer();
+    if (cust && cust.id !== 1) {
+      customers = customers.map(c => c.id === cust.id ? { ...c, photo: dataUrl } : c);
+      DB.saveCustomers(customers);
+      APP.toast('Customer photo saved to their profile');
+    } else {
+      APP.toast('Photo attached to this sale');
+    }
+  });
 
   document.getElementById('addCustomerBtn').addEventListener('click', () => {
     new bootstrap.Modal(document.getElementById('addCustomerModal')).show();
@@ -1539,6 +1789,7 @@ PAGES.pos = async function (mount, session) {
       addedToWallet,
       paymentMethod,
       mbAccountId,
+      customerPhoto: currentCustPhoto || null,
       userId: session.userId,
       userName: session.fullName
     };
@@ -1589,8 +1840,7 @@ PAGES.pos = async function (mount, session) {
     document.getElementById('printArea').innerHTML = `
       <div class="receipt">
         <div class="text-center">
-          ${window.LOGO_PRINT ? `<center><img src="${window.LOGO_PRINT}" style="max-width:100px;margin-bottom:6px;"></center>` : ''}
-		  </br>
+          ${window.LOGO_PRINT ? `<img src="${window.LOGO_PRINT}" style="max-width:55px;display:block;margin:0 auto 4px;">` : ''}
           <strong>${APP.escapeHtml(s.shopName)}</strong><br>
           <span>${APP.escapeHtml(s.address || '')}</span><br>
           <span>${APP.escapeHtml(s.phone || '')}</span>
@@ -1611,8 +1861,8 @@ PAGES.pos = async function (mount, session) {
         <div class="d-flex justify-content-between"><span>Tax</span><span>+${APP.fmt(sale.tax)}</span></div>
         <div class="d-flex justify-content-between fw-semibold"><span>Sale Total</span><span>${APP.fmt(sale.total)}</span></div>
         ${sale.prevCreditIncluded ? `<div class="d-flex justify-content-between text-danger"><span>Previous Credit Included</span><span>+${APP.fmt(sale.prevCreditIncluded)}</span></div>` : ''}
-        <div class="d-flex justify-content-between fw-bold"><span>AMOUNT DUE</span><span>${APP.fmt(sale.grandTotalCharged)}</span></div>
         ${sale.walletApplied ? `<div class="d-flex justify-content-between"><span>Wallet Applied</span><span>-${APP.fmt(sale.walletApplied)}</span></div>` : ''}
+        <div class="d-flex justify-content-between fw-bold"><span>AMOUNT DUE</span><span>${APP.fmt(sale.grandTotalCharged - (sale.walletApplied || 0))}</span></div>
         <div class="d-flex justify-content-between"><span>Tendered (${sale.paymentMethod})</span><span>${APP.fmt(sale.tendered)}</span></div>
         ${acct ? `<div>Received in: ${APP.escapeHtml(acct.provider)} - ${APP.escapeHtml(acct.label)}</div>` : ''}
         <div class="d-flex justify-content-between"><span>Change</span><span>${APP.fmt(sale.change)}</span></div>
@@ -1669,7 +1919,7 @@ PAGES.products = async function (mount, session) {
         <div class="table-responsive">
           <table class="table mb-0 align-middle">
             <thead><tr>
-              <th>Product</th><th>Category</th><th>Brand</th><th class="text-end">Cost</th>
+              <th></th><th>Product</th><th>Category</th><th>Brand</th><th class="text-end">Cost</th>
               <th class="text-end">Sale Price</th><th class="text-end">Stock</th><th class="text-end">Actions</th>
             </tr></thead>
             <tbody id="productsTbody"></tbody>
@@ -1684,6 +1934,12 @@ PAGES.products = async function (mount, session) {
         <div class="modal-content">
           <div class="modal-header"><h6 class="modal-title" id="productModalTitle">Add Product</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
           <div class="modal-body">
+            <div class="text-center mb-2">
+              <img id="pPhotoPreview" src="" style="width:90px;height:90px;object-fit:cover;border-radius:12px;border:1px solid #e5e7f0;display:none;">
+              <div id="pPhotoPlaceholder" class="mx-auto d-flex align-items-center justify-content-center" style="width:90px;height:90px;border-radius:12px;background:#f4f5fb;color:#aab;font-size:1.6rem;"><i class="fas fa-box"></i></div>
+              <button type="button" class="btn btn-outline-secondary btn-sm mt-2" id="pCaptureBtn"><i class="fas fa-camera me-1"></i>Add Photo</button>
+              <button type="button" class="btn btn-outline-danger btn-sm mt-2 d-none" id="pRemovePhotoBtn"><i class="fas fa-trash"></i></button>
+            </div>
             <div class="row g-2">
               <div class="col-12"><label class="form-label small">Name</label><input class="form-control" id="pName" required></div>
               <div class="col-6"><label class="form-label small">SKU / Barcode</label><input class="form-control" id="pSku"></div>
@@ -1730,6 +1986,7 @@ PAGES.products = async function (mount, session) {
     const rows = products.filter(p => !t || p.name.toLowerCase().includes(t) || (p.sku || '').toLowerCase().includes(t) || (p.brand || '').toLowerCase().includes(t));
     document.getElementById('productsTbody').innerHTML = rows.length ? rows.map(p => `
       <tr>
+        <td>${p.image ? `<img src="${p.image}" style="width:36px;height:36px;object-fit:cover;border-radius:8px;">` : `<div style="width:36px;height:36px;border-radius:8px;background:#f4f5fb;color:#aab;display:flex;align-items:center;justify-content:center;"><i class="fas fa-box"></i></div>`}</td>
         <td><div class="fw-semibold">${APP.escapeHtml(p.name)}</div><div class="text-muted small">${APP.escapeHtml(p.sku || '')}</div></td>
         <td>${APP.escapeHtml(catName(p.categoryId))}</td>
         <td>${APP.escapeHtml(p.brand || '')}</td>
@@ -1740,17 +1997,38 @@ PAGES.products = async function (mount, session) {
           <button class="btn btn-sm btn-outline-secondary editBtn" data-id="${p.id}"><i class="fas fa-pen"></i></button>
           <button class="btn btn-sm btn-outline-danger delBtn" data-id="${p.id}"><i class="fas fa-trash"></i></button>
         </td>
-      </tr>`).join('') : `<tr><td colspan="7" class="text-center text-muted py-4">No products found.</td></tr>`;
+      </tr>`).join('') : `<tr><td colspan="8" class="text-center text-muted py-4">No products found.</td></tr>`;
 
     document.getElementById('productsTbody').querySelectorAll('.editBtn').forEach(b => b.addEventListener('click', () => openEdit(Number(b.dataset.id))));
     document.getElementById('productsTbody').querySelectorAll('.delBtn').forEach(b => b.addEventListener('click', () => deleteProduct(Number(b.dataset.id))));
   }
+
+  let currentPhoto = null;
+
+  function setPhotoPreview(dataUrl) {
+    currentPhoto = dataUrl || null;
+    const img = document.getElementById('pPhotoPreview');
+    const placeholder = document.getElementById('pPhotoPlaceholder');
+    const removeBtn = document.getElementById('pRemovePhotoBtn');
+    if (currentPhoto) {
+      img.src = currentPhoto; img.style.display = 'block'; placeholder.style.display = 'none'; removeBtn.classList.remove('d-none');
+    } else {
+      img.style.display = 'none'; placeholder.style.display = 'flex'; removeBtn.classList.add('d-none');
+    }
+  }
+
+  document.getElementById('pCaptureBtn').addEventListener('click', async () => {
+    const dataUrl = await APP.captureImage('Product Photo');
+    if (dataUrl) setPhotoPreview(dataUrl);
+  });
+  document.getElementById('pRemovePhotoBtn').addEventListener('click', () => setPhotoPreview(null));
 
   function openAdd() {
     editingId = null;
     document.getElementById('productModalTitle').textContent = 'Add Product';
     ['pName', 'pSku', 'pBrand', 'pStock', 'pCost', 'pPrice'].forEach(id => document.getElementById(id).value = '');
     document.getElementById('pMinStock').value = 5;
+    setPhotoPreview(null);
     fillCategorySelect();
     new bootstrap.Modal(document.getElementById('productModal')).show();
   }
@@ -1769,6 +2047,7 @@ PAGES.products = async function (mount, session) {
     document.getElementById('pCost').value = p.costPrice;
     document.getElementById('pPrice').value = p.salePrice;
     document.getElementById('pMinStock').value = p.minStock;
+    setPhotoPreview(p.image || null);
     new bootstrap.Modal(document.getElementById('productModal')).show();
   }
 
@@ -1795,7 +2074,8 @@ PAGES.products = async function (mount, session) {
       stock: Number(document.getElementById('pStock').value) || 0,
       costPrice: Number(document.getElementById('pCost').value) || 0,
       salePrice: Number(document.getElementById('pPrice').value) || 0,
-      minStock: Number(document.getElementById('pMinStock').value) || 0
+      minStock: Number(document.getElementById('pMinStock').value) || 0,
+      image: currentPhoto
     };
     if (editingId) {
       products = products.map(p => p.id === editingId ? { ...p, ...data } : p);
@@ -1965,6 +2245,7 @@ PAGES.customers = async function (mount, session) {
   const sales = DB.getSales();
   let editingId = null;
   let walletCustId = null;
+  let currentPhoto = null;
 
   mount.innerHTML = `
     <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
@@ -1975,7 +2256,7 @@ PAGES.customers = async function (mount, session) {
       <div class="card-body p-0">
         <div class="table-responsive">
           <table class="table mb-0 align-middle">
-            <thead><tr><th>Name</th><th>Phone</th><th>Address</th><th class="text-end">Total Spent</th><th class="text-end">Orders</th><th class="text-end">Wallet</th><th class="text-end">Credit Owed</th><th class="text-end">Actions</th></tr></thead>
+            <thead><tr><th></th><th>Name</th><th>Phone</th><th>Address</th><th class="text-end">Total Spent</th><th class="text-end">Orders</th><th class="text-end">Wallet</th><th class="text-end">Credit Owed</th><th class="text-end">Actions</th></tr></thead>
             <tbody id="tbody"></tbody>
           </table>
         </div>
@@ -1987,6 +2268,12 @@ PAGES.customers = async function (mount, session) {
         <div class="modal-content">
           <div class="modal-header"><h6 class="modal-title" id="custModalTitle">Add Customer</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
           <div class="modal-body">
+            <div class="text-center mb-2">
+              <img id="cPhotoPreview" src="" style="width:80px;height:80px;object-fit:cover;border-radius:50%;border:1px solid #e5e7f0;display:none;cursor:pointer;" title="Click to view full size">
+              <div id="cPhotoPlaceholder" class="mx-auto d-flex align-items-center justify-content-center" style="width:80px;height:80px;border-radius:50%;background:#f4f5fb;color:#aab;font-size:1.6rem;"><i class="fas fa-user"></i></div>
+              <button type="button" class="btn btn-outline-secondary btn-sm mt-2" id="cCaptureBtn"><i class="fas fa-camera me-1"></i>Add Photo</button>
+              <button type="button" class="btn btn-outline-danger btn-sm mt-2 d-none" id="cRemovePhotoBtn"><i class="fas fa-trash"></i></button>
+            </div>
             <div class="mb-2"><label class="form-label small">Name</label><input class="form-control" id="cName" required></div>
             <div class="mb-2"><label class="form-label small">Phone</label><input class="form-control" id="cPhone"></div>
             <div class="mb-2"><label class="form-label small">Address</label><input class="form-control" id="cAddress"></div>
@@ -2026,6 +2313,17 @@ PAGES.customers = async function (mount, session) {
         </div>
       </div>
     </div>
+
+    <div class="modal fade" id="photoViewModal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header"><h6 class="modal-title" id="photoViewName"></h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body text-center">
+            <img id="photoViewImg" src="" style="max-width:100%;max-height:70vh;border-radius:8px;">
+          </div>
+        </div>
+      </div>
+    </div>
   `;
 
   function stats(custId) {
@@ -2042,6 +2340,7 @@ PAGES.customers = async function (mount, session) {
       const credit = c.creditBalance || 0;
       return `
       <tr>
+        <td>${c.photo ? `<img src="${c.photo}" data-fullphoto="${APP.escapeHtml(c.photo)}" data-photoname="${APP.escapeHtml(c.name)}" class="custThumb" style="width:32px;height:32px;object-fit:cover;border-radius:50%;cursor:pointer;">` : `<div style="width:32px;height:32px;border-radius:50%;background:#f4f5fb;color:#aab;display:flex;align-items:center;justify-content:center;"><i class="fas fa-user"></i></div>`}</td>
         <td class="fw-semibold">${APP.escapeHtml(c.name)}</td>
         <td>${APP.escapeHtml(c.phone || '—')}</td>
         <td>${APP.escapeHtml(c.address || '—')}</td>
@@ -2055,17 +2354,49 @@ PAGES.customers = async function (mount, session) {
           ${c.id !== 1 ? `<button class="btn btn-sm btn-outline-danger delBtn" data-id="${c.id}"><i class="fas fa-trash"></i></button>` : ''}
         </td>
       </tr>`;
-    }).join('') : `<tr><td colspan="8" class="text-center text-muted py-4">No customers found.</td></tr>`;
+    }).join('') : `<tr><td colspan="9" class="text-center text-muted py-4">No customers found.</td></tr>`;
 
     document.getElementById('tbody').querySelectorAll('.editBtn').forEach(b => b.addEventListener('click', () => openEdit(Number(b.dataset.id))));
     document.getElementById('tbody').querySelectorAll('.delBtn').forEach(b => b.addEventListener('click', () => del(Number(b.dataset.id))));
     document.getElementById('tbody').querySelectorAll('.walletBtn').forEach(b => b.addEventListener('click', () => openWallet(Number(b.dataset.id))));
+    document.getElementById('tbody').querySelectorAll('.custThumb').forEach(img => img.addEventListener('click', () => {
+      viewFullPhoto(img.dataset.fullphoto, img.dataset.photoname);
+    }));
   }
+
+  function viewFullPhoto(photo, name) {
+    document.getElementById('photoViewName').textContent = name || 'Photo';
+    document.getElementById('photoViewImg').src = photo;
+    new bootstrap.Modal(document.getElementById('photoViewModal')).show();
+  }
+
+  function setPhotoPreview(dataUrl) {
+    currentPhoto = dataUrl || null;
+    const img = document.getElementById('cPhotoPreview');
+    const placeholder = document.getElementById('cPhotoPlaceholder');
+    const removeBtn = document.getElementById('cRemovePhotoBtn');
+    if (currentPhoto) {
+      img.src = currentPhoto; img.style.display = 'block'; placeholder.style.display = 'none'; removeBtn.classList.remove('d-none');
+    } else {
+      img.style.display = 'none'; placeholder.style.display = 'flex'; removeBtn.classList.add('d-none');
+    }
+  }
+
+  document.getElementById('cPhotoPreview').addEventListener('click', () => {
+    if (currentPhoto) viewFullPhoto(currentPhoto, document.getElementById('cName').value || 'Photo');
+  });
+
+  document.getElementById('cCaptureBtn').addEventListener('click', async () => {
+    const dataUrl = await APP.captureImage('Customer Photo');
+    if (dataUrl) setPhotoPreview(dataUrl);
+  });
+  document.getElementById('cRemovePhotoBtn').addEventListener('click', () => setPhotoPreview(null));
 
   function openAdd() {
     editingId = null;
     document.getElementById('custModalTitle').textContent = 'Add Customer';
     ['cName', 'cPhone', 'cAddress'].forEach(id => document.getElementById(id).value = '');
+    setPhotoPreview(null);
     new bootstrap.Modal(document.getElementById('custModal')).show();
   }
   function openEdit(id) {
@@ -2076,6 +2407,7 @@ PAGES.customers = async function (mount, session) {
     document.getElementById('cName').value = c.name;
     document.getElementById('cPhone').value = c.phone || '';
     document.getElementById('cAddress').value = c.address || '';
+    setPhotoPreview(c.photo || null);
     new bootstrap.Modal(document.getElementById('custModal')).show();
   }
   function del(id) {
@@ -2129,7 +2461,7 @@ PAGES.customers = async function (mount, session) {
   document.getElementById('saveBtn').addEventListener('click', () => {
     const name = document.getElementById('cName').value.trim();
     if (!name) { APP.toast('Name is required', 'warning'); return; }
-    const data = { name, phone: document.getElementById('cPhone').value.trim(), address: document.getElementById('cAddress').value.trim() };
+    const data = { name, phone: document.getElementById('cPhone').value.trim(), address: document.getElementById('cAddress').value.trim(), photo: currentPhoto };
     if (editingId) {
       customers = customers.map(c => c.id === editingId ? { ...c, ...data } : c);
     } else {
@@ -2372,7 +2704,7 @@ PAGES.sales = async function (mount, session) {
         <div class="modal-content">
           <div class="modal-header"><h6 class="modal-title">Invoice Details</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
           <div class="modal-body" id="printArea"></div>
-          <div class="modal-footer"><button class="btn btn-brand" onclick="window.print()"><i class="fas fa-print me-1"></i>Print</button></div>
+          <div class="modal-footer"><button class="btn btn-brand" data-ro-safe="true" onclick="window.print()"><i class="fas fa-print me-1"></i>Print</button></div>
         </div>
       </div>
     </div>
@@ -2389,7 +2721,7 @@ PAGES.sales = async function (mount, session) {
         <td>${APP.escapeHtml(s.customerName)}</td>
         <td>${APP.escapeHtml(s.userName)}</td>
         <td class="text-end fw-semibold">${APP.fmt(s.total)}</td>
-        <td class="text-end"><button class="btn btn-sm btn-outline-secondary viewBtn" data-id="${s.id}"><i class="fas fa-eye"></i> View</button></td>
+        <td class="text-end"><button class="btn btn-sm btn-outline-secondary viewBtn" data-id="${s.id}" data-ro-safe="true"><i class="fas fa-eye"></i> View</button></td>
       </tr>`).join('') : `<tr><td colspan="6" class="text-center text-muted py-4">No sales found.</td></tr>`;
     document.getElementById('tbody').querySelectorAll('.viewBtn').forEach(b => b.addEventListener('click', () => view(Number(b.dataset.id))));
   }
@@ -2401,7 +2733,7 @@ PAGES.sales = async function (mount, session) {
     const acct = s.mbAccountId ? (DB.getMbAccounts().find(a => a.id === s.mbAccountId)) : null;
     document.getElementById('printArea').innerHTML = `
       <div class="receipt">
-        <div class="text-center">${window.LOGO_PRINT ? `<img src="${window.LOGO_PRINT}" style="max-width:150px;margin-bottom:6px;"><br>` : ''}<strong>${APP.escapeHtml(set.shopName)}</strong><br>${APP.escapeHtml(set.address || '')}<br>${APP.escapeHtml(set.phone || '')}</div>
+        <div class="text-center">${window.LOGO_PRINT ? `<img src="${window.LOGO_PRINT}" style="max-width:55px;display:block;margin:0 auto 4px;"><br>` : ''}<strong>${APP.escapeHtml(set.shopName)}</strong><br>${APP.escapeHtml(set.address || '')}<br>${APP.escapeHtml(set.phone || '')}</div>
         <hr>
         <div>Invoice: ${s.invoiceNo}</div>
         <div>Date: ${APP.fmtDate(s.date)}</div>
@@ -2415,8 +2747,8 @@ PAGES.sales = async function (mount, session) {
         <div class="d-flex justify-content-between"><span>Tax</span><span>+${APP.fmt(s.tax)}</span></div>
         <div class="d-flex justify-content-between fw-semibold"><span>Sale Total</span><span>${APP.fmt(s.total)}</span></div>
         ${s.prevCreditIncluded ? `<div class="d-flex justify-content-between text-danger"><span>Previous Credit Included</span><span>+${APP.fmt(s.prevCreditIncluded)}</span></div>` : ''}
-        <div class="d-flex justify-content-between fw-bold"><span>AMOUNT DUE</span><span>${APP.fmt(s.grandTotalCharged != null ? s.grandTotalCharged : s.total)}</span></div>
         ${s.walletApplied ? `<div class="d-flex justify-content-between"><span>Wallet Applied</span><span>-${APP.fmt(s.walletApplied)}</span></div>` : ''}
+        <div class="d-flex justify-content-between fw-bold"><span>AMOUNT DUE</span><span>${APP.fmt((s.grandTotalCharged != null ? s.grandTotalCharged : s.total) - (s.walletApplied || 0))}</span></div>
         <div class="d-flex justify-content-between"><span>Tendered (${s.paymentMethod})</span><span>${APP.fmt(s.tendered != null ? s.tendered : s.paid)}</span></div>
         ${acct ? `<div>Received in: ${APP.escapeHtml(acct.provider)} - ${APP.escapeHtml(acct.label)}</div>` : ''}
         <div class="d-flex justify-content-between"><span>Change</span><span>${APP.fmt(s.change)}</span></div>
@@ -2604,7 +2936,9 @@ PAGES.reports = async function (mount, session) {
 PAGES.users = async function (mount, session) {
 
   let users = DB.getUsers();
+  let customRoles = DB.getCustomRoles();
   let editingId = null;
+  let editingRoleKey = null;
 
   mount.innerHTML = `
     <div class="row g-3">
@@ -2613,7 +2947,7 @@ PAGES.users = async function (mount, session) {
           <h6 class="mb-0 text-muted">Staff Accounts</h6>
           <button class="btn btn-brand" id="addBtn"><i class="fas fa-user-plus me-1"></i>Add User</button>
         </div>
-        <div class="card">
+        <div class="card mb-3">
           <div class="card-body p-0">
             <div class="table-responsive">
               <table class="table mb-0 align-middle">
@@ -2623,7 +2957,21 @@ PAGES.users = async function (mount, session) {
             </div>
           </div>
         </div>
+
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h6 class="mb-0 text-muted">Custom Roles</h6>
+          <button class="btn btn-outline-secondary" id="addRoleBtn"><i class="fas fa-user-shield me-1"></i>Create Role</button>
+        </div>
+        <div class="card">
+          <div class="card-body p-0">
+            <table class="table mb-0 align-middle">
+              <thead><tr><th>Role</th><th>Access</th><th>Mode</th><th class="text-end">Actions</th></tr></thead>
+              <tbody id="rolesTbody"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
+
       <div class="col-lg-4">
         <div class="card">
           <div class="card-header">Role Permissions</div>
@@ -2636,9 +2984,13 @@ PAGES.users = async function (mount, session) {
               <span class="role-pill role-manager">MANAGER</span>
               <div class="small text-muted mt-1">POS, products/stock, customers, purchases/suppliers, sales history, reports. No user management or settings.</div>
             </div>
-            <div>
+            <div class="mb-3">
               <span class="role-pill role-cashier">CASHIER</span>
               <div class="small text-muted mt-1">POS (new sales) and customers only. Can view only their own sales history.</div>
+            </div>
+            <div>
+              <span class="badge bg-secondary">CUSTOM ROLES</span>
+              <div class="small text-muted mt-1">Create a role for a specific job — e.g. an "Auditor" who can open any page to review it but never add, edit, or delete anything (read only).</div>
             </div>
           </div>
         </div>
@@ -2653,11 +3005,7 @@ PAGES.users = async function (mount, session) {
             <div class="mb-2"><label class="form-label small">Full Name</label><input class="form-control" id="uFullName" required></div>
             <div class="mb-2"><label class="form-label small">Username</label><input class="form-control" id="uUsername" required></div>
             <div class="mb-2"><label class="form-label small">Role</label>
-              <select class="form-select" id="uRole">
-                <option value="admin">Administrator</option>
-                <option value="manager">Manager</option>
-                <option value="cashier">Cashier</option>
-              </select>
+              <select class="form-select" id="uRole"></select>
             </div>
             <div class="mb-2"><label class="form-label small" id="pwdLabel">Password</label><input type="password" class="form-control" id="uPassword"></div>
             <div class="form-check form-switch">
@@ -2669,14 +3017,40 @@ PAGES.users = async function (mount, session) {
         </div>
       </div>
     </div>
+
+    <div class="modal fade" id="roleModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header"><h6 class="modal-title" id="roleModalTitle">Create Role</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body">
+            <div class="mb-2"><label class="form-label small">Role Name</label><input class="form-control" id="rLabel" placeholder="e.g. Auditor"></div>
+            <div class="mb-2">
+              <label class="form-label small d-block">Pages this role can open</label>
+              <div id="rPagesBox" class="row g-1"></div>
+            </div>
+            <div class="form-check form-switch mt-2">
+              <input class="form-check-input" type="checkbox" id="rReadOnly">
+              <label class="form-check-label small" for="rReadOnly">Read only — can view every allowed page but cannot add, edit, delete, or check out a sale</label>
+            </div>
+          </div>
+          <div class="modal-footer"><button class="btn btn-brand" id="saveRoleBtn">Save Role</button></div>
+        </div>
+      </div>
+    </div>
   `;
 
+  function fillRoleSelect() {
+    const sel = document.getElementById('uRole');
+    sel.innerHTML = AUTH.allRoleOptions().map(r => `<option value="${r.key}">${APP.escapeHtml(r.label)}</option>`).join('');
+  }
+
   function render() {
+    users = DB.getUsers();
     document.getElementById('tbody').innerHTML = users.map(u => `
       <tr>
         <td class="fw-semibold">${APP.escapeHtml(u.fullName)}</td>
         <td>${APP.escapeHtml(u.username)}</td>
-        <td><span class="role-pill role-${u.role}">${AUTH.ROLE_LABELS[u.role]}</span></td>
+        <td><span class="role-pill role-${u.role}">${AUTH.roleLabel(u.role)}</span></td>
         <td>${u.active ? '<span class="badge badge-stock-ok">Active</span>' : '<span class="badge badge-stock-low">Disabled</span>'}</td>
         <td class="text-end">
           <button class="btn btn-sm btn-outline-secondary editBtn" data-id="${u.id}"><i class="fas fa-pen"></i></button>
@@ -2685,6 +3059,22 @@ PAGES.users = async function (mount, session) {
       </tr>`).join('');
     document.getElementById('tbody').querySelectorAll('.editBtn').forEach(b => b.addEventListener('click', () => openEdit(Number(b.dataset.id))));
     document.getElementById('tbody').querySelectorAll('.delBtn').forEach(b => b.addEventListener('click', () => del(Number(b.dataset.id))));
+    renderRoles();
+  }
+
+  function renderRoles() {
+    document.getElementById('rolesTbody').innerHTML = customRoles.length ? customRoles.map(r => `
+      <tr>
+        <td class="fw-semibold">${APP.escapeHtml(r.label)}</td>
+        <td class="small">${(r.pages || []).map(p => APP.escapeHtml((APP.NAV_ITEMS.find(n => n.page === p) || {}).label || p)).join(', ') || '—'}</td>
+        <td>${r.readOnly ? '<span class="badge badge-stock-low">Read Only</span>' : '<span class="badge badge-stock-ok">Full Access</span>'}</td>
+        <td class="text-end">
+          <button class="btn btn-sm btn-outline-secondary editRoleBtn" data-key="${r.key}"><i class="fas fa-pen"></i></button>
+          <button class="btn btn-sm btn-outline-danger delRoleBtn" data-key="${r.key}"><i class="fas fa-trash"></i></button>
+        </td>
+      </tr>`).join('') : `<tr><td colspan="4" class="text-center text-muted py-3">No custom roles yet.</td></tr>`;
+    document.getElementById('rolesTbody').querySelectorAll('.editRoleBtn').forEach(b => b.addEventListener('click', () => openEditRole(b.dataset.key)));
+    document.getElementById('rolesTbody').querySelectorAll('.delRoleBtn').forEach(b => b.addEventListener('click', () => delRole(b.dataset.key)));
   }
 
   function openAdd() {
@@ -2692,6 +3082,7 @@ PAGES.users = async function (mount, session) {
     document.getElementById('userModalTitle').textContent = 'Add User';
     document.getElementById('pwdLabel').textContent = 'Password';
     ['uFullName', 'uUsername', 'uPassword'].forEach(id => document.getElementById(id).value = '');
+    fillRoleSelect();
     document.getElementById('uRole').value = 'cashier';
     document.getElementById('uActive').checked = true;
     new bootstrap.Modal(document.getElementById('userModal')).show();
@@ -2703,6 +3094,7 @@ PAGES.users = async function (mount, session) {
     editingId = id;
     document.getElementById('userModalTitle').textContent = 'Edit User';
     document.getElementById('pwdLabel').textContent = 'New Password (leave blank to keep current)';
+    fillRoleSelect();
     document.getElementById('uFullName').value = u.fullName;
     document.getElementById('uUsername').value = u.username;
     document.getElementById('uRole').value = u.role;
@@ -2762,6 +3154,70 @@ PAGES.users = async function (mount, session) {
     bootstrap.Modal.getInstance(document.getElementById('userModal')).hide();
     render();
     APP.toast('User saved');
+  });
+
+  // ---- Custom Roles ----
+  function fillPagesBox(selectedPages) {
+    const sel = selectedPages || [];
+    document.getElementById('rPagesBox').innerHTML = APP.NAV_ITEMS.map(n => `
+      <div class="col-6">
+        <div class="form-check">
+          <input class="form-check-input rPageChk" type="checkbox" value="${n.page}" id="rp_${n.page}" ${sel.includes(n.page) ? 'checked' : ''}>
+          <label class="form-check-label small" for="rp_${n.page}">${APP.escapeHtml(n.label)}</label>
+        </div>
+      </div>`).join('');
+  }
+
+  function openAddRole() {
+    editingRoleKey = null;
+    document.getElementById('roleModalTitle').textContent = 'Create Role';
+    document.getElementById('rLabel').value = '';
+    document.getElementById('rReadOnly').checked = true;
+    fillPagesBox([]);
+    new bootstrap.Modal(document.getElementById('roleModal')).show();
+  }
+
+  function openEditRole(key) {
+    const r = customRoles.find(x => x.key === key);
+    if (!r) return;
+    editingRoleKey = key;
+    document.getElementById('roleModalTitle').textContent = 'Edit Role';
+    document.getElementById('rLabel').value = r.label;
+    document.getElementById('rReadOnly').checked = !!r.readOnly;
+    fillPagesBox(r.pages || []);
+    new bootstrap.Modal(document.getElementById('roleModal')).show();
+  }
+
+  function delRole(key) {
+    if (users.some(u => u.role === key)) { APP.toast('Cannot delete: some users still have this role', 'warning'); return; }
+    if (!APP.confirmAction('Delete this role?')) return;
+    customRoles = customRoles.filter(r => r.key !== key);
+    DB.saveCustomRoles(customRoles);
+    renderRoles();
+    APP.toast('Role deleted');
+  }
+
+  document.getElementById('addRoleBtn').addEventListener('click', openAddRole);
+
+  document.getElementById('saveRoleBtn').addEventListener('click', () => {
+    const label = document.getElementById('rLabel').value.trim();
+    if (!label) { APP.toast('Role name is required', 'warning'); return; }
+    const pages = Array.from(document.querySelectorAll('.rPageChk:checked')).map(el => el.value);
+    if (!pages.length) { APP.toast('Select at least one page for this role', 'warning'); return; }
+    const readOnly = document.getElementById('rReadOnly').checked;
+
+    if (editingRoleKey) {
+      customRoles = customRoles.map(r => r.key === editingRoleKey ? { ...r, label, pages, readOnly } : r);
+      DB.logActivity(session.fullName, 'Edit Role', label);
+    } else {
+      const key = 'role_' + DB.nextId('customRole');
+      customRoles.push({ key, label, pages, readOnly });
+      DB.logActivity(session.fullName, 'Create Role', label);
+    }
+    DB.saveCustomRoles(customRoles);
+    bootstrap.Modal.getInstance(document.getElementById('roleModal')).hide();
+    renderRoles();
+    APP.toast('Role saved');
   });
 
   render();
@@ -2885,6 +3341,7 @@ PAGES.mobilebanking = async function (mount, session) {
   const canManageAccounts = session.role === 'admin' || session.role === 'manager';
   let accounts = DB.getMbAccounts();
   let txns = DB.getMbTransactions();
+  let currentTxnPhoto = null;
 
   const TYPE_LABELS = {
     bill: 'Utility Bill Payment',
@@ -2926,6 +3383,11 @@ PAGES.mobilebanking = async function (mount, session) {
               <div class="col-6"><label class="form-label small">Customer Name</label><input class="form-control" id="txnCustName"></div>
               <div class="col-6"><label class="form-label small">Customer Phone</label><input class="form-control" id="txnCustPhone"></div>
             </div>
+            <div class="d-flex align-items-center gap-2 mb-2">
+              <img id="txnPhotoThumb" src="" style="width:36px;height:36px;object-fit:cover;border-radius:50%;display:none;border:1px solid #e5e7f0;">
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="txnCaptureBtn"><i class="fas fa-camera me-1"></i>Customer Photo <span class="text-muted">(optional)</span></button>
+              <button type="button" class="btn btn-outline-danger btn-sm d-none" id="txnRemovePhotoBtn"><i class="fas fa-trash"></i></button>
+            </div>
             <div class="row g-2 mb-2">
               <div class="col-6"><label class="form-label small">Amount</label><input type="number" min="0" class="form-control" id="txnAmount"></div>
               <div class="col-6"><label class="form-label small">Your Commission</label><input type="number" min="0" class="form-control" id="txnCommission" value="0"></div>
@@ -2941,7 +3403,7 @@ PAGES.mobilebanking = async function (mount, session) {
           <div class="card-header">Transaction History</div>
           <div class="card-body p-0" style="max-height: 560px; overflow-y:auto;">
             <table class="table table-sm mb-0">
-              <thead><tr><th>Date</th><th>Type</th><th>Account</th><th>Customer</th><th class="text-end">Amount</th><th class="text-end">Commission</th><th class="text-end">Receipt</th></tr></thead>
+              <thead><tr><th></th><th>Date</th><th>Type</th><th>Account</th><th>Customer</th><th class="text-end">Amount</th><th class="text-end">Commission</th><th class="text-end">Receipt</th></tr></thead>
               <tbody id="txnBody"></tbody>
             </table>
           </div>
@@ -2954,7 +3416,7 @@ PAGES.mobilebanking = async function (mount, session) {
         <div class="modal-content">
           <div class="modal-header"><h6 class="modal-title">Transaction Receipt</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
           <div class="modal-body" id="mbPrintArea"></div>
-          <div class="modal-footer"><button class="btn btn-brand" onclick="window.print()"><i class="fas fa-print me-1"></i>Print</button></div>
+          <div class="modal-footer"><button class="btn btn-brand" data-ro-safe="true" onclick="window.print()"><i class="fas fa-print me-1"></i>Print</button></div>
         </div>
       </div>
     </div>
@@ -3016,21 +3478,35 @@ PAGES.mobilebanking = async function (mount, session) {
   }
   document.getElementById('txnType').addEventListener('change', updateBillerFieldLabel);
 
+  function setTxnPhoto(dataUrl) {
+    currentTxnPhoto = dataUrl || null;
+    const thumb = document.getElementById('txnPhotoThumb');
+    const removeBtn = document.getElementById('txnRemovePhotoBtn');
+    if (currentTxnPhoto) { thumb.src = currentTxnPhoto; thumb.style.display = 'inline-block'; removeBtn.classList.remove('d-none'); }
+    else { thumb.style.display = 'none'; removeBtn.classList.add('d-none'); }
+  }
+  document.getElementById('txnCaptureBtn').addEventListener('click', async () => {
+    const dataUrl = await APP.captureImage('Customer Photo');
+    if (dataUrl) setTxnPhoto(dataUrl);
+  });
+  document.getElementById('txnRemovePhotoBtn').addEventListener('click', () => setTxnPhoto(null));
+
   function renderTxnHistory() {
     const sorted = [...txns].sort((a, b) => new Date(b.date) - new Date(a.date));
     document.getElementById('txnBody').innerHTML = sorted.length ? sorted.map(t => {
       const acct = accounts.find(a => a.id === t.accountId);
       return `
       <tr>
+        <td>${t.custPhoto ? `<img src="${t.custPhoto}" style="width:30px;height:30px;object-fit:cover;border-radius:50%;">` : ''}</td>
         <td class="small text-muted">${APP.fmtDate(t.date)}</td>
         <td><span class="badge bg-light text-dark border">${TYPE_LABELS[t.type] || t.type}</span></td>
         <td class="small">${acct ? APP.escapeHtml(acct.provider) : '—'}</td>
         <td class="small">${APP.escapeHtml(t.custName || '—')}${t.biller ? ' · ' + APP.escapeHtml(t.biller) : ''}</td>
         <td class="text-end">${APP.fmt(t.amount)}</td>
         <td class="text-end text-success">${t.commission ? '+' + APP.fmt(t.commission) : '—'}</td>
-        <td class="text-end"><button class="btn btn-sm btn-outline-secondary viewTxnBtn" data-id="${t.id}"><i class="fas fa-receipt me-1"></i>Print</button></td>
+        <td class="text-end"><button class="btn btn-sm btn-outline-secondary viewTxnBtn" data-id="${t.id}" data-ro-safe="true"><i class="fas fa-receipt me-1"></i>Print</button></td>
       </tr>`;
-    }).join('') : `<tr><td colspan="7" class="text-center text-muted py-4">No transactions recorded yet.</td></tr>`;
+    }).join('') : `<tr><td colspan="8" class="text-center text-muted py-4">No transactions recorded yet.</td></tr>`;
     document.getElementById('txnBody').querySelectorAll('.viewTxnBtn').forEach(b => b.addEventListener('click', () => showTxnReceipt(Number(b.dataset.id))));
   }
 
@@ -3042,7 +3518,7 @@ PAGES.mobilebanking = async function (mount, session) {
     document.getElementById('mbPrintArea').innerHTML = `
       <div class="receipt">
         <div class="text-center">
-          ${window.LOGO_PRINT ? `<img src="${window.LOGO_PRINT}" style="max-width:150px;margin-bottom:6px;">` : ''}
+          ${window.LOGO_PRINT ? `<img src="${window.LOGO_PRINT}" style="max-width:55px;display:block;margin:0 auto 4px;">` : ''}
           <strong>${APP.escapeHtml(settings.shopName)}</strong><br>
           <span>${APP.escapeHtml(settings.address || '')}</span><br>
           <span>${APP.escapeHtml(settings.phone || '')}</span>
@@ -3088,6 +3564,7 @@ PAGES.mobilebanking = async function (mount, session) {
       biller: document.getElementById('txnBiller').value.trim(),
       custName: document.getElementById('txnCustName').value.trim(),
       custPhone: document.getElementById('txnCustPhone').value.trim(),
+      custPhoto: currentTxnPhoto || null,
       amount,
       commission,
       note: document.getElementById('txnNote').value.trim(),
@@ -3100,6 +3577,7 @@ PAGES.mobilebanking = async function (mount, session) {
 
     ['txnBiller', 'txnCustName', 'txnCustPhone', 'txnAmount', 'txnNote'].forEach(id => document.getElementById(id).value = '');
     document.getElementById('txnCommission').value = 0;
+    setTxnPhoto(null);
 
     renderAccountCards();
     renderTxnHistory();
@@ -3147,6 +3625,482 @@ PAGES.mobilebanking = async function (mount, session) {
   fillAccountSelect();
   renderAccountCards();
   renderTxnHistory();
+};
+
+
+PAGES.attendance = async function (mount, session) {
+
+  const canManageStaff = session.role === 'admin' || session.role === 'manager';
+  let users = DB.getUsers();
+  let attendance = DB.getAttendance();
+  let deductions = DB.getSalaryDeductions();
+  let settings = DB.getSettings();
+  let deductStaffId = null;
+
+  const STATUS_LABELS = { present: 'Present', 'half-day': 'Half Day', leave: 'On Leave', absent: 'Absent' };
+
+  function todayStr() {
+    const d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function dutyStartFor(user) {
+    return (user && user.dutyStart) || settings.shiftStartTime || '09:00';
+  }
+  function lateLimitFor(user) {
+    if (user && user.lateLimitMinutes != null && user.lateLimitMinutes !== '') return Number(user.lateLimitMinutes);
+    return settings.lateGraceMinutes != null ? settings.lateGraceMinutes : 15;
+  }
+
+  function computeLateMinutes(rec) {
+    if (!rec.checkIn) return 0;
+    const user = users.find(u => u.id === rec.userId);
+    const shiftStart = dutyStartFor(user);
+    const grace = lateLimitFor(user);
+    const [h, m] = shiftStart.split(':').map(Number);
+    const allowed = new Date(rec.date + 'T00:00:00');
+    allowed.setHours(h, (m || 0) + grace, 0, 0);
+    const checkIn = new Date(rec.checkIn);
+    const diffMin = Math.round((checkIn - allowed) / 60000);
+    return diffMin > 0 ? diffMin : 0;
+  }
+
+  function hoursWorked(rec) {
+    if (!rec.checkIn || !rec.checkOut) return null;
+    const ms = new Date(rec.checkOut) - new Date(rec.checkIn);
+    return (ms / 3600000).toFixed(1);
+  }
+
+  mount.innerHTML = `
+    <div class="row g-3 mb-3">
+      <div class="col-lg-5">
+        <div class="card h-100">
+          <div class="card-header"><i class="fas fa-user-clock me-1"></i>My Attendance — Today</div>
+          <div class="card-body">
+            <div id="myStatusBox" class="mb-3"></div>
+            <div class="d-flex gap-2">
+              <button class="btn btn-brand flex-grow-1" id="checkInBtn"><i class="fas fa-right-to-bracket me-1"></i>Check In</button>
+              <button class="btn btn-outline-secondary flex-grow-1" id="checkOutBtn"><i class="fas fa-right-from-bracket me-1"></i>Check Out</button>
+            </div>
+            <div class="text-muted small mt-2" id="myDutyInfo"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-7">
+        <div class="card h-100">
+          <div class="card-header">My Recent Attendance</div>
+          <div class="card-body p-0" style="max-height:220px;overflow-y:auto;">
+            <table class="table table-sm mb-0">
+              <thead><tr><th>Date</th><th>Status</th><th>Check In</th><th>Check Out</th><th class="text-end">Late (min)</th><th class="text-end">Hours</th></tr></thead>
+              <tbody id="myHistoryBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header">My Salary — This Month</div>
+      <div class="card-body">
+        <div class="row g-3" id="mySalaryBox"></div>
+      </div>
+    </div>
+
+    <div id="adminSection"></div>
+
+    <div class="modal fade" id="deductModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header"><h6 class="modal-title">Salary Deductions — <span id="deductStaffName"></span></h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body">
+            <div class="row g-2 mb-3">
+              <div class="col-5"><input type="number" min="0" class="form-control" id="deductAmount" placeholder="Amount"></div>
+              <div class="col-5"><input class="form-control" id="deductReason" placeholder="Reason (e.g. Late, Advance)"></div>
+              <div class="col-2"><button class="btn btn-brand w-100" id="addDeductBtn"><i class="fas fa-plus"></i></button></div>
+            </div>
+            <table class="table table-sm">
+              <thead><tr><th>Date</th><th>Reason</th><th class="text-end">Amount</th><th></th></tr></thead>
+              <tbody id="deductBody"></tbody>
+            </table>
+            <div class="text-end fw-bold" id="deductTotal"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // ---------------- My Attendance (all roles) ----------------
+  function renderMyStatus() {
+    const today = todayStr();
+    const me = users.find(u => u.id === session.userId);
+    const rec = attendance.find(a => a.userId === session.userId && a.date === today);
+    const box = document.getElementById('myStatusBox');
+    if (!rec) {
+      box.innerHTML = `<span class="badge badge-stock-low">Not checked in today</span>`;
+    } else if (!rec.checkOut) {
+      const late = computeLateMinutes(rec);
+      box.innerHTML = `<span class="badge badge-stock-ok">Checked in at ${fmtTime(rec.checkIn)}</span> ${late > 0 ? `<span class="badge badge-stock-low ms-1">Late by ${late} min</span>` : ''}`;
+    } else {
+      box.innerHTML = `<span class="badge badge-stock-ok">Checked in ${fmtTime(rec.checkIn)}</span> <span class="badge bg-light text-dark border ms-1">Checked out ${fmtTime(rec.checkOut)}</span>`;
+    }
+    document.getElementById('checkInBtn').disabled = !!rec;
+    document.getElementById('checkOutBtn').disabled = !rec || !!rec.checkOut;
+    document.getElementById('myDutyInfo').textContent = `Your duty: ${dutyStartFor(me)} onward · Late allowed: ${lateLimitFor(me)} min`;
+  }
+
+  function renderMyHistory() {
+    const mine = attendance.filter(a => a.userId === session.userId).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 15);
+    document.getElementById('myHistoryBody').innerHTML = mine.length ? mine.map(r => {
+      const late = computeLateMinutes(r);
+      const hrs = hoursWorked(r);
+      return `<tr>
+        <td class="small">${r.date}</td>
+        <td class="small"><span class="badge bg-light text-dark border">${STATUS_LABELS[r.status || 'present']}</span></td>
+        <td class="small">${fmtTime(r.checkIn)}</td>
+        <td class="small">${fmtTime(r.checkOut)}</td>
+        <td class="text-end">${late > 0 ? `<span class="text-danger">${late}</span>` : '—'}</td>
+        <td class="text-end">${hrs || '—'}</td>
+      </tr>`;
+    }).join('') : `<tr><td colspan="6" class="text-center text-muted py-4">No attendance recorded yet.</td></tr>`;
+  }
+
+  function monthSummaryFor(userId) {
+    const monthKey = todayStr().slice(0, 7);
+    const recs = attendance.filter(a => a.userId === userId && a.date.startsWith(monthKey));
+    const present = recs.filter(r => (r.status || 'present') === 'present').length;
+    const halfDay = recs.filter(r => r.status === 'half-day').length;
+    const leave = recs.filter(r => r.status === 'leave').length;
+    const absent = recs.filter(r => r.status === 'absent').length;
+    const lateMinutes = recs.reduce((s, r) => s + computeLateMinutes(r), 0);
+    const monthDeductions = deductions.filter(d => d.userId === userId && d.date.startsWith(monthKey));
+    const totalDeduction = monthDeductions.reduce((s, d) => s + d.amount, 0);
+    return { present, halfDay, leave, absent, lateMinutes, totalDeduction, deductionCount: monthDeductions.length };
+  }
+
+  function renderMySalary() {
+    const me = users.find(u => u.id === session.userId);
+    const salary = (me && me.salary) || 0;
+    const sum = monthSummaryFor(session.userId);
+    const net = Math.max(salary - sum.totalDeduction, 0);
+    document.getElementById('mySalaryBox').innerHTML = `
+      <div class="col-6 col-lg-3"><div class="kpi-card c1 h-100"><div class="kpi-label">Base Salary</div><div class="kpi-value">${APP.fmt(salary)}</div></div></div>
+      <div class="col-6 col-lg-3"><div class="kpi-card c3 h-100"><div class="kpi-label">Deductions</div><div class="kpi-value">${APP.fmt(sum.totalDeduction)}</div></div></div>
+      <div class="col-6 col-lg-3"><div class="kpi-card c2 h-100"><div class="kpi-label">Net Salary</div><div class="kpi-value">${APP.fmt(net)}</div></div></div>
+      <div class="col-6 col-lg-3"><div class="kpi-card c4 h-100"><div class="kpi-label">Present / Half / Leave / Absent</div><div class="kpi-value" style="font-size:1.1rem;">${sum.present} / ${sum.halfDay} / ${sum.leave} / ${sum.absent}</div></div></div>
+    `;
+  }
+
+  document.getElementById('checkInBtn').addEventListener('click', () => {
+    const today = todayStr();
+    if (attendance.find(a => a.userId === session.userId && a.date === today)) { APP.toast('Already checked in today', 'warning'); return; }
+    const rec = { id: DB.nextId('attendance'), userId: session.userId, userName: session.fullName, date: today, checkIn: new Date().toISOString(), checkOut: null, status: 'present' };
+    attendance.push(rec);
+    DB.saveAttendance(attendance);
+    const late = computeLateMinutes(rec);
+    DB.logActivity(session.fullName, 'Check In', late > 0 ? `Late by ${late} min` : 'On time');
+    refreshAll();
+    APP.toast(late > 0 ? `Checked in — late by ${late} minute(s)` : 'Checked in — on time');
+  });
+
+  document.getElementById('checkOutBtn').addEventListener('click', () => {
+    const today = todayStr();
+    const rec = attendance.find(a => a.userId === session.userId && a.date === today);
+    if (!rec || rec.checkOut) return;
+    rec.checkOut = new Date().toISOString();
+    DB.saveAttendance(attendance);
+    DB.logActivity(session.fullName, 'Check Out', '');
+    refreshAll();
+    APP.toast('Checked out');
+  });
+
+  // ---------------- Admin/Manager sections ----------------
+  function renderAdminSection() {
+    if (!canManageStaff) { document.getElementById('adminSection').innerHTML = ''; return; }
+    document.getElementById('adminSection').innerHTML = `
+      <div class="row g-3">
+        <div class="col-lg-5">
+          <div class="card mb-3">
+            <div class="card-header">Default Duty Settings</div>
+            <div class="card-body">
+              <div class="row g-2">
+                <div class="col-6">
+                  <label class="form-label small">Default Shift Start</label>
+                  <input type="time" class="form-control" id="shiftStartInput" value="${settings.shiftStartTime || '09:00'}">
+                </div>
+                <div class="col-6">
+                  <label class="form-label small">Default Late Allowance (min)</label>
+                  <input type="number" min="0" class="form-control" id="graceInput" value="${settings.lateGraceMinutes != null ? settings.lateGraceMinutes : 15}">
+                </div>
+              </div>
+              <button class="btn btn-brand w-100 mt-2" id="saveAttSettingsBtn"><i class="fas fa-check me-1"></i>Save Defaults</button>
+              <div class="text-muted small mt-2">Used for any staff member without a personal duty timing set below.</div>
+            </div>
+          </div>
+
+          <div class="card mb-3">
+            <div class="card-header">Staff Duty Timings</div>
+            <div class="card-body p-0">
+              <table class="table table-sm mb-0">
+                <thead><tr><th>Staff</th><th>Duty Start</th><th>Duty End</th><th>Late Limit</th><th></th></tr></thead>
+                <tbody id="dutyBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">Salary Management — This Month</div>
+            <div class="card-body p-0">
+              <table class="table table-sm mb-0">
+                <thead><tr><th>Staff</th><th class="text-end">Salary</th><th class="text-end">P/H/L/A</th><th class="text-end">Late</th><th class="text-end">Deduct.</th><th class="text-end">Net</th><th></th></tr></thead>
+                <tbody id="salaryBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-lg-7">
+          <div class="card mb-3">
+            <div class="card-header"><i class="fas fa-pen me-1"></i>Mark Attendance For Staff</div>
+            <div class="card-body">
+              <div class="row g-2">
+                <div class="col-5">
+                  <label class="form-label small">Staff</label>
+                  <select class="form-select" id="markStaffSelect"></select>
+                </div>
+                <div class="col-3">
+                  <label class="form-label small">Date</label>
+                  <input type="date" class="form-control" id="markDate" value="${todayStr()}">
+                </div>
+                <div class="col-4">
+                  <label class="form-label small">Status</label>
+                  <select class="form-select" id="markStatus">
+                    <option value="present">Present</option>
+                    <option value="half-day">Half Day</option>
+                    <option value="leave">On Leave (Holiday)</option>
+                    <option value="absent">Absent</option>
+                  </select>
+                </div>
+                <div class="col-4" id="markCheckInWrap">
+                  <label class="form-label small">Check-In Time</label>
+                  <input type="time" class="form-control" id="markCheckIn">
+                </div>
+                <div class="col-4" id="markCheckOutWrap">
+                  <label class="form-label small">Check-Out Time</label>
+                  <input type="time" class="form-control" id="markCheckOut">
+                </div>
+                <div class="col-4">
+                  <label class="form-label small">Note</label>
+                  <input class="form-control" id="markNote" placeholder="Optional">
+                </div>
+              </div>
+              <button class="btn btn-brand w-100 mt-3" id="saveMarkBtn"><i class="fas fa-circle-check me-1"></i>Save Attendance Record</button>
+              <div class="text-muted small mt-2">If a record already exists for this staff on this date, it will be updated.</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">All Staff Attendance</div>
+            <div class="card-body p-0" style="max-height:420px;overflow-y:auto;">
+              <table class="table table-sm mb-0">
+                <thead><tr><th>Staff</th><th>Date</th><th>Status</th><th>Check In</th><th>Check Out</th><th class="text-end">Late</th><th class="text-end">Hours</th></tr></thead>
+                <tbody id="allAttBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('saveAttSettingsBtn').addEventListener('click', () => {
+      settings = { ...settings, shiftStartTime: document.getElementById('shiftStartInput').value || '09:00', lateGraceMinutes: Number(document.getElementById('graceInput').value) || 0 };
+      DB.saveSettings(settings);
+      DB.logActivity(session.fullName, 'Update Attendance Settings', `Shift ${settings.shiftStartTime}, grace ${settings.lateGraceMinutes}m`);
+      refreshAll();
+      APP.toast('Default duty settings saved');
+    });
+
+    fillMarkStaffSelect();
+    updateMarkFieldVisibility();
+    document.getElementById('markStatus').addEventListener('change', updateMarkFieldVisibility);
+
+    document.getElementById('saveMarkBtn').addEventListener('click', () => {
+      const staffId = Number(document.getElementById('markStaffSelect').value);
+      const date = document.getElementById('markDate').value;
+      const status = document.getElementById('markStatus').value;
+      if (!staffId || !date) { APP.toast('Select staff and date', 'warning'); return; }
+      const staff = users.find(u => u.id === staffId);
+      const ciTime = document.getElementById('markCheckIn').value;
+      const coTime = document.getElementById('markCheckOut').value;
+      const checkIn = (status === 'present' || status === 'half-day') && ciTime ? `${date}T${ciTime}:00` : null;
+      const checkOut = (status === 'present' || status === 'half-day') && coTime ? `${date}T${coTime}:00` : null;
+
+      const existing = attendance.find(a => a.userId === staffId && a.date === date);
+      if (existing) {
+        Object.assign(existing, { status, checkIn, checkOut, note: document.getElementById('markNote').value.trim(), markedBy: session.fullName });
+      } else {
+        attendance.push({ id: DB.nextId('attendance'), userId: staffId, userName: staff.fullName, date, checkIn, checkOut, status, note: document.getElementById('markNote').value.trim(), markedBy: session.fullName });
+      }
+      DB.saveAttendance(attendance);
+      DB.logActivity(session.fullName, 'Mark Attendance', `${staff.fullName} — ${date} — ${STATUS_LABELS[status]}`);
+      document.getElementById('markNote').value = '';
+      refreshAll();
+      APP.toast('Attendance record saved');
+    });
+
+    renderDutyTable();
+    renderAllAttendance();
+    renderSalaryTable();
+  }
+
+  function updateMarkFieldVisibility() {
+    const status = document.getElementById('markStatus').value;
+    const show = status === 'present' || status === 'half-day';
+    document.getElementById('markCheckInWrap').style.display = show ? '' : 'none';
+    document.getElementById('markCheckOutWrap').style.display = show ? '' : 'none';
+  }
+
+  function fillMarkStaffSelect() {
+    document.getElementById('markStaffSelect').innerHTML = users.map(u => `<option value="${u.id}">${APP.escapeHtml(u.fullName)}</option>`).join('');
+  }
+
+  function renderDutyTable() {
+    document.getElementById('dutyBody').innerHTML = users.map(u => `
+      <tr>
+        <td class="small">${APP.escapeHtml(u.fullName)}</td>
+        <td><input type="time" class="form-control form-control-sm dutyStartInput" data-id="${u.id}" value="${u.dutyStart || ''}" placeholder="${settings.shiftStartTime || '09:00'}"></td>
+        <td><input type="time" class="form-control form-control-sm dutyEndInput" data-id="${u.id}" value="${u.dutyEnd || ''}"></td>
+        <td><input type="number" min="0" class="form-control form-control-sm lateLimitInput" data-id="${u.id}" value="${u.lateLimitMinutes != null ? u.lateLimitMinutes : ''}" placeholder="${settings.lateGraceMinutes != null ? settings.lateGraceMinutes : 15}" style="width:70px;"></td>
+        <td><button class="btn btn-sm btn-outline-secondary saveDutyBtn" data-id="${u.id}"><i class="fas fa-check"></i></button></td>
+      </tr>`).join('');
+    document.getElementById('dutyBody').querySelectorAll('.saveDutyBtn').forEach(b => b.addEventListener('click', () => {
+      const id = Number(b.dataset.id);
+      const dutyStart = document.querySelector(`.dutyStartInput[data-id="${id}"]`).value;
+      const dutyEnd = document.querySelector(`.dutyEndInput[data-id="${id}"]`).value;
+      const lateLimitRaw = document.querySelector(`.lateLimitInput[data-id="${id}"]`).value;
+      users = users.map(u => u.id === id ? { ...u, dutyStart: dutyStart || null, dutyEnd: dutyEnd || null, lateLimitMinutes: lateLimitRaw === '' ? null : Number(lateLimitRaw) } : u);
+      DB.saveUsers(users);
+      const u = users.find(x => x.id === id);
+      DB.logActivity(session.fullName, 'Set Duty Timing', `${u.fullName} — ${dutyStart || 'default'} to ${dutyEnd || '—'}`);
+      renderAllAttendance(); renderSalaryTable();
+      APP.toast('Duty timing saved');
+    }));
+  }
+
+  function renderAllAttendance() {
+    if (!canManageStaff) return;
+    const sorted = [...attendance].sort((a, b) => b.date.localeCompare(a.date));
+    document.getElementById('allAttBody').innerHTML = sorted.length ? sorted.map(r => {
+      const late = computeLateMinutes(r);
+      const hrs = hoursWorked(r);
+      return `<tr>
+        <td class="small">${APP.escapeHtml(r.userName)}</td>
+        <td class="small">${r.date}</td>
+        <td class="small"><span class="badge ${r.status === 'absent' ? 'badge-stock-low' : 'bg-light text-dark border'}">${STATUS_LABELS[r.status || 'present']}</span></td>
+        <td class="small">${fmtTime(r.checkIn)}</td>
+        <td class="small">${fmtTime(r.checkOut)}</td>
+        <td class="text-end">${late > 0 ? `<span class="text-danger">${late}</span>` : '—'}</td>
+        <td class="text-end">${hrs || '—'}</td>
+      </tr>`;
+    }).join('') : `<tr><td colspan="7" class="text-center text-muted py-4">No attendance recorded yet.</td></tr>`;
+  }
+
+  function renderSalaryTable() {
+    if (!canManageStaff) return;
+    document.getElementById('salaryBody').innerHTML = users.map(u => {
+      const sum = monthSummaryFor(u.id);
+      const salary = u.salary || 0;
+      const net = Math.max(salary - sum.totalDeduction, 0);
+      return `<tr>
+        <td class="small">${APP.escapeHtml(u.fullName)}<div class="text-muted">${AUTH.roleLabel(u.role)}</div></td>
+        <td class="text-end"><input type="number" min="0" class="form-control form-control-sm salaryInput" data-id="${u.id}" value="${salary}" style="width:90px;display:inline-block;"></td>
+        <td class="text-end small">${sum.present}/${sum.halfDay}/${sum.leave}/${sum.absent}</td>
+        <td class="text-end">${sum.lateMinutes > 0 ? `<span class="text-danger">${sum.lateMinutes}</span>` : '—'}</td>
+        <td class="text-end">${sum.totalDeduction > 0 ? APP.fmt(sum.totalDeduction) : '—'}</td>
+        <td class="text-end fw-semibold">${APP.fmt(net)}</td>
+        <td class="text-end">
+          <button class="btn btn-sm btn-outline-secondary saveSalaryBtn" data-id="${u.id}" title="Save salary"><i class="fas fa-check"></i></button>
+          <button class="btn btn-sm btn-outline-danger openDeductBtn" data-id="${u.id}" title="Manage deductions"><i class="fas fa-minus"></i></button>
+        </td>
+      </tr>`;
+    }).join('');
+
+    document.getElementById('salaryBody').querySelectorAll('.saveSalaryBtn').forEach(b => b.addEventListener('click', () => {
+      const id = Number(b.dataset.id);
+      const input = document.querySelector(`.salaryInput[data-id="${id}"]`);
+      const amount = Number(input.value) || 0;
+      users = users.map(u => u.id === id ? { ...u, salary: amount } : u);
+      DB.saveUsers(users);
+      const u = users.find(x => x.id === id);
+      DB.logActivity(session.fullName, 'Set Salary', `${u.fullName} — ${APP.fmt(amount)}`);
+      APP.toast('Salary updated');
+    }));
+    document.getElementById('salaryBody').querySelectorAll('.openDeductBtn').forEach(b => b.addEventListener('click', () => openDeductions(Number(b.dataset.id))));
+  }
+
+  // ---------------- Deductions modal ----------------
+  function openDeductions(userId) {
+    deductStaffId = userId;
+    const u = users.find(x => x.id === userId);
+    document.getElementById('deductStaffName').textContent = u ? u.fullName : '';
+    document.getElementById('deductAmount').value = '';
+    document.getElementById('deductReason').value = '';
+    renderDeductList();
+    new bootstrap.Modal(document.getElementById('deductModal')).show();
+  }
+
+  function renderDeductList() {
+    const monthKey = todayStr().slice(0, 7);
+    const list = deductions.filter(d => d.userId === deductStaffId && d.date.startsWith(monthKey)).sort((a, b) => b.date.localeCompare(a.date));
+    document.getElementById('deductBody').innerHTML = list.length ? list.map(d => `
+      <tr>
+        <td class="small">${d.date}</td>
+        <td class="small">${APP.escapeHtml(d.reason || '')}</td>
+        <td class="text-end">${APP.fmt(d.amount)}</td>
+        <td class="text-end"><button class="btn btn-sm btn-outline-danger delDeductBtn" data-id="${d.id}"><i class="fas fa-trash"></i></button></td>
+      </tr>`).join('') : `<tr><td colspan="4" class="text-center text-muted py-3">No deductions this month.</td></tr>`;
+    const total = list.reduce((s, d) => s + d.amount, 0);
+    document.getElementById('deductTotal').textContent = 'Total this month: ' + APP.fmt(total);
+    document.getElementById('deductBody').querySelectorAll('.delDeductBtn').forEach(b => b.addEventListener('click', () => {
+      deductions = deductions.filter(d => d.id !== Number(b.dataset.id));
+      DB.saveSalaryDeductions(deductions);
+      renderDeductList(); renderSalaryTable();
+    }));
+  }
+
+  document.getElementById('addDeductBtn').addEventListener('click', () => {
+    const amount = Number(document.getElementById('deductAmount').value) || 0;
+    if (amount <= 0) { APP.toast('Enter a valid amount', 'warning'); return; }
+    const reason = document.getElementById('deductReason').value.trim();
+    deductions.push({ id: DB.nextId('deduction'), userId: deductStaffId, date: todayStr(), amount, reason, createdBy: session.fullName });
+    DB.saveSalaryDeductions(deductions);
+    const u = users.find(x => x.id === deductStaffId);
+    DB.logActivity(session.fullName, 'Salary Deduction', `${u ? u.fullName : ''} — ${APP.fmt(amount)} (${reason})`);
+    document.getElementById('deductAmount').value = '';
+    document.getElementById('deductReason').value = '';
+    renderDeductList();
+    renderSalaryTable();
+    APP.toast('Deduction added');
+  });
+
+  function refreshAll() {
+    attendance = DB.getAttendance();
+    users = DB.getUsers();
+    deductions = DB.getSalaryDeductions();
+    renderMyStatus();
+    renderMyHistory();
+    renderMySalary();
+    if (canManageStaff) { renderAllAttendance(); renderSalaryTable(); }
+  }
+
+  renderMyStatus();
+  renderMyHistory();
+  renderMySalary();
+  renderAdminSection();
 };
 
 </script>
@@ -3203,3 +4157,4 @@ PAGES.mobilebanking = async function (mount, session) {
 </script>
 </body>
 </html>
+
