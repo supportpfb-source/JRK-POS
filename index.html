@@ -289,7 +289,9 @@ const DB = (() => {
     mbTransactions: 'pos_mb_transactions',
     attendance: 'pos_attendance',
     salaryDeductions: 'pos_salary_deductions',
-    customRoles: 'pos_custom_roles'
+    customRoles: 'pos_custom_roles',
+    expenses: 'pos_expenses',
+    shiftSessions: 'pos_shift_sessions'
   };
 
   function read(key, fallback) {
@@ -335,7 +337,7 @@ const DB = (() => {
   function logActivity(userName, action, details) {
     const log = read(KEYS.activity, []);
     log.unshift({ id: nextId('activity'), userName, action, details, at: new Date().toISOString() });
-    write(KEYS.activity, log.slice(0, 300)); // keep last 300
+    write(KEYS.activity, log.slice(0, 2000)); // keep last 2000
   }
 
   async function seedIfEmpty() {
@@ -400,7 +402,7 @@ const DB = (() => {
 
     let suppliers = read(KEYS.suppliers, null);
     if (!suppliers) {
-      suppliers = [{ id: 1, name: 'Karachi Mobile Accessories Wholesale', phone: '0300-0000000', address: 'Saddar, Karachi' }];
+      suppliers = [{ id: 1, name: 'Karachi Mobile Accessories Wholesale', phone: '0300-0000000', address: 'Saddar, Karachi', creditBalance: 0, walletBalance: 0 }];
       write(KEYS.suppliers, suppliers);
       const counters = read(KEYS.counters, {});
       counters.supplier = 1;
@@ -414,8 +416,8 @@ const DB = (() => {
     let mbAccounts = read(KEYS.mbAccounts, null);
     if (!mbAccounts) {
       mbAccounts = [
-        { id: 1, provider: 'JazzCash', label: 'JazzCash Merchant', accountNumber: '0300-0000000', openingBalance: 20000 },
-        { id: 2, provider: 'EasyPaisa', label: 'EasyPaisa Merchant', accountNumber: '0300-1111111', openingBalance: 20000 }
+        { id: 1, provider: 'JazzCash', label: 'JazzCash Merchant', accountNumber: '0300-0000000', openingBalance: 20000, type: 'wallet' },
+        { id: 2, provider: 'EasyPaisa', label: 'EasyPaisa Merchant', accountNumber: '0300-1111111', openingBalance: 20000, type: 'wallet' }
       ];
       write(KEYS.mbAccounts, mbAccounts);
       const counters = read(KEYS.counters, {});
@@ -442,6 +444,8 @@ const DB = (() => {
     if (!read(KEYS.attendance, null)) write(KEYS.attendance, []);
     if (!read(KEYS.salaryDeductions, null)) write(KEYS.salaryDeductions, []);
     if (!read(KEYS.customRoles, null)) write(KEYS.customRoles, []);
+    if (!read(KEYS.expenses, null)) write(KEYS.expenses, []);
+    if (!read(KEYS.shiftSessions, null)) write(KEYS.shiftSessions, []);
   }
 
   return {
@@ -473,7 +477,11 @@ const DB = (() => {
     getSalaryDeductions: () => read(KEYS.salaryDeductions, []),
     saveSalaryDeductions: (v) => write(KEYS.salaryDeductions, v),
     getCustomRoles: () => read(KEYS.customRoles, []),
-    saveCustomRoles: (v) => write(KEYS.customRoles, v)
+    saveCustomRoles: (v) => write(KEYS.customRoles, v),
+    getExpenses: () => read(KEYS.expenses, []),
+    saveExpenses: (v) => write(KEYS.expenses, v),
+    getShiftSessions: () => read(KEYS.shiftSessions, []),
+    saveShiftSessions: (v) => write(KEYS.shiftSessions, v)
   };
 })();
 
@@ -657,9 +665,9 @@ const AUTH = (() => {
   // pages/actions here only. Custom roles (created by the Administrator
   // under Users & Roles) are stored separately in DB.getCustomRoles().
   const PERMISSIONS = {
-    admin:   ['dashboard', 'pos', 'products', 'customers', 'purchases', 'sales', 'mobilebanking', 'attendance', 'reports', 'users', 'settings'],
-    manager: ['dashboard', 'pos', 'products', 'customers', 'purchases', 'sales', 'mobilebanking', 'attendance', 'reports'],
-    cashier: ['dashboard', 'pos', 'customers', 'sales', 'mobilebanking', 'attendance']
+    admin:   ['dashboard', 'pos', 'products', 'customers', 'purchases', 'sales', 'mobilebanking', 'attendance', 'expenses', 'activitylog', 'reports', 'users', 'settings'],
+    manager: ['dashboard', 'pos', 'products', 'customers', 'purchases', 'sales', 'mobilebanking', 'attendance', 'expenses', 'activitylog', 'reports'],
+    cashier: ['dashboard', 'pos', 'customers', 'sales', 'mobilebanking', 'attendance', 'expenses']
   };
 
   const ROLE_LABELS = { admin: 'Administrator', manager: 'Manager', cashier: 'Cashier' };
@@ -773,6 +781,8 @@ const APP = (() => {
     sales: 'Sales History',
     mobilebanking: 'Mobile Banking Services',
     attendance: 'Staff Attendance',
+    expenses: 'Daily Expenses',
+    activitylog: 'Activity Log',
     reports: 'Reports',
     users: 'Users & Roles',
     settings: 'Settings'
@@ -787,6 +797,8 @@ const APP = (() => {
     { page: 'sales',     icon: 'fa-receipt',      label: 'Sales History' },
     { page: 'mobilebanking', icon: 'fa-wallet', label: 'Mobile Banking' },
     { page: 'attendance', icon: 'fa-user-clock', label: 'Staff Attendance' },
+    { page: 'expenses',  icon: 'fa-file-invoice-dollar', label: 'Daily Expenses' },
+    { page: 'activitylog', icon: 'fa-clipboard-list', label: 'Activity Log' },
     { page: 'reports',   icon: 'fa-chart-line',     label: 'Reports' },
     { page: 'users',     icon: 'fa-id-badge', label: 'Users & Roles' },
     { page: 'settings',  icon: 'fa-gear',         label: 'Settings' }
@@ -877,8 +889,11 @@ const APP = (() => {
     </div>`;
     document.getElementById('shellRoot').innerHTML = shell;
 
-    document.getElementById('logoutBtn').addEventListener('click', () => {
-      if (confirmAction('Logout from POS?')) AUTH.logout();
+    document.getElementById('logoutBtn').addEventListener('click', async () => {
+      if (confirmAction('Logout from POS?')) {
+        if (typeof SHIFT !== 'undefined') await SHIFT.promptClosing(session);
+        AUTH.logout();
+      }
     });
     const toggle = document.getElementById('sidebarToggle');
     if (toggle) toggle.addEventListener('click', () => document.getElementById('sidebar').classList.toggle('show'));
@@ -1174,6 +1189,150 @@ const APP = (() => {
     navigateTo, showLogin, showApp, boot, getCurrentPage: () => currentPage,
     captureImage
   };
+})();
+
+</script>
+<script>
+/* =========================================================
+   Mobile POS — Shift / Cash Drawer Sessions
+   - On login: shows the last recorded closing balance (cash +
+     every mobile banking account) as the suggested opening
+     balance for this shift; the user confirms or corrects it.
+   - On logout: asks the user to enter the actual closing
+     balance for cash + every mobile banking account before
+     completing the logout.
+   ========================================================= */
+
+const SHIFT = (() => {
+  function computeAccountBalance(acctId) {
+    const acct = DB.getMbAccounts().find(a => a.id === acctId);
+    if (!acct) return 0;
+    let bal = acct.openingBalance || 0;
+    DB.getMbTransactions().filter(t => t.accountId === acctId).forEach(t => {
+      if (t.type === 'cashin' || t.type === 'sale') bal += t.amount;
+      else bal -= t.amount;
+    });
+    return bal;
+  }
+
+  function lastClosedSession() {
+    const closed = DB.getShiftSessions().filter(s => s.closing).sort((a, b) => new Date(b.logoutTime) - new Date(a.logoutTime));
+    return closed[0] || null;
+  }
+
+  function suggestedOpeningBalances(accounts) {
+    const last = lastClosedSession();
+    const opening = { cash: last && last.closing.cash != null ? last.closing.cash : 0 };
+    accounts.forEach(a => {
+      const key = 'mb_' + a.id;
+      opening[key] = last && last.closing[key] != null ? last.closing[key] : computeAccountBalance(a.id);
+    });
+    return opening;
+  }
+
+  function ensureModal(id, titleHtml, confirmLabel) {
+    let wrap = document.getElementById(id);
+    if (wrap) return wrap;
+    const div = document.createElement('div');
+    div.innerHTML = `
+      <div class="modal fade" id="${id}" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header"><h6 class="modal-title">${titleHtml}</h6></div>
+            <div class="modal-body">
+              <p class="small text-muted" id="${id}Hint"></p>
+              <div id="${id}Fields"></div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-brand w-100" id="${id}ConfirmBtn">${confirmLabel}</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(div.firstElementChild);
+    return document.getElementById(id);
+  }
+
+  function promptOpening(userSession) {
+    return new Promise((resolve) => {
+      const accounts = DB.getMbAccounts();
+      const suggested = suggestedOpeningBalances(accounts);
+      const wrap = ensureModal('shiftOpenModal', '<i class="fas fa-cash-register me-1"></i>Shift Opening Balances', '<i class="fas fa-circle-check me-1"></i>Confirm &amp; Start Shift');
+
+      document.getElementById('shiftOpenModalHint').textContent = 'Carried over from the last closing balance — confirm these are correct, or adjust if different.';
+      let html = `<div class="mb-2"><label class="form-label small fw-semibold">Cash in Drawer</label><input type="number" class="form-control" id="shiftOpenCash" value="${suggested.cash}"></div>`;
+      accounts.forEach(a => {
+        html += `<div class="mb-2"><label class="form-label small">${APP.escapeHtml(a.provider)} - ${APP.escapeHtml(a.label)}</label><input type="number" class="form-control shift-open-acct" data-id="${a.id}" value="${suggested['mb_' + a.id]}"></div>`;
+      });
+      if (!accounts.length) html += `<div class="text-muted small">No mobile banking accounts set up yet.</div>`;
+      document.getElementById('shiftOpenModalFields').innerHTML = html;
+
+      const oldBtn = document.getElementById('shiftOpenModalConfirmBtn');
+      const btn = oldBtn.cloneNode(true);
+      oldBtn.parentNode.replaceChild(btn, oldBtn);
+      btn.addEventListener('click', () => {
+        const opening = { cash: Number(document.getElementById('shiftOpenCash').value) || 0 };
+        document.querySelectorAll('.shift-open-acct').forEach(inp => { opening['mb_' + inp.dataset.id] = Number(inp.value) || 0; });
+        const sessions = DB.getShiftSessions();
+        const record = {
+          id: DB.nextId('shift'),
+          userId: userSession.userId,
+          userName: userSession.fullName,
+          loginTime: new Date().toISOString(),
+          logoutTime: null,
+          opening,
+          closing: null
+        };
+        sessions.push(record);
+        DB.saveShiftSessions(sessions);
+        localStorage.setItem('pos_current_shift_id', String(record.id));
+        DB.logActivity(userSession.fullName, 'Shift Opened', `Cash: ${APP.fmt(opening.cash)}`);
+        bootstrap.Modal.getInstance(wrap).hide();
+        resolve();
+      });
+
+      new bootstrap.Modal(wrap).show();
+    });
+  }
+
+  function promptClosing(userSession) {
+    return new Promise((resolve) => {
+      const shiftId = Number(localStorage.getItem('pos_current_shift_id'));
+      const accounts = DB.getMbAccounts();
+      const wrap = ensureModal('shiftCloseModal', '<i class="fas fa-cash-register me-1"></i>Shift Closing Balances', '<i class="fas fa-right-from-bracket me-1"></i>Confirm &amp; Logout');
+
+      document.getElementById('shiftCloseModalHint').textContent = 'Please count and enter the actual closing balance before logging out.';
+      let html = `<div class="mb-2"><label class="form-label small fw-semibold">Cash in Drawer (counted)</label><input type="number" class="form-control" id="shiftCloseCash" placeholder="0"></div>`;
+      accounts.forEach(a => {
+        html += `<div class="mb-2"><label class="form-label small">${APP.escapeHtml(a.provider)} - ${APP.escapeHtml(a.label)}</label><input type="number" class="form-control shift-close-acct" data-id="${a.id}" placeholder="${computeAccountBalance(a.id)}"></div>`;
+      });
+      if (!accounts.length) html += `<div class="text-muted small">No mobile banking accounts set up yet.</div>`;
+      document.getElementById('shiftCloseModalFields').innerHTML = html;
+
+      const oldBtn = document.getElementById('shiftCloseModalConfirmBtn');
+      const btn = oldBtn.cloneNode(true);
+      oldBtn.parentNode.replaceChild(btn, oldBtn);
+      btn.addEventListener('click', () => {
+        const closing = { cash: Number(document.getElementById('shiftCloseCash').value) || 0 };
+        document.querySelectorAll('.shift-close-acct').forEach(inp => { closing['mb_' + inp.dataset.id] = Number(inp.value) || 0; });
+        const sessions = DB.getShiftSessions();
+        const idx = sessions.findIndex(s => s.id === shiftId);
+        if (idx > -1) {
+          sessions[idx].closing = closing;
+          sessions[idx].logoutTime = new Date().toISOString();
+          DB.saveShiftSessions(sessions);
+        }
+        localStorage.removeItem('pos_current_shift_id');
+        DB.logActivity(userSession.fullName, 'Shift Closed', `Cash: ${APP.fmt(closing.cash)}`);
+        bootstrap.Modal.getInstance(wrap).hide();
+        resolve();
+      });
+
+      new bootstrap.Modal(wrap).show();
+    });
+  }
+
+  return { promptOpening, promptClosing, computeAccountBalance, lastClosedSession };
 })();
 
 </script>
@@ -1895,6 +2054,7 @@ PAGES.products = async function (mount, session) {
 
   let products = DB.getProducts();
   let categories = DB.getCategories();
+  let suppliers = DB.getSuppliers();
   let editingId = null;
 
   mount.innerHTML = `
@@ -1919,7 +2079,7 @@ PAGES.products = async function (mount, session) {
         <div class="table-responsive">
           <table class="table mb-0 align-middle">
             <thead><tr>
-              <th></th><th>Product</th><th>Category</th><th>Brand</th><th class="text-end">Cost</th>
+              <th></th><th>Product</th><th>Category</th><th>Brand</th><th>Supplier</th><th class="text-end">Cost</th>
               <th class="text-end">Sale Price</th><th class="text-end">Stock</th><th class="text-end">Actions</th>
             </tr></thead>
             <tbody id="productsTbody"></tbody>
@@ -1945,6 +2105,13 @@ PAGES.products = async function (mount, session) {
               <div class="col-6"><label class="form-label small">SKU / Barcode</label><input class="form-control" id="pSku"></div>
               <div class="col-6"><label class="form-label small">Brand</label><input class="form-control" id="pBrand"></div>
               <div class="col-6"><label class="form-label small">Category</label><select class="form-select" id="pCategory"></select></div>
+              <div class="col-6">
+                <label class="form-label small">Supplier (optional)</label>
+                <div class="input-group">
+                  <select class="form-select" id="pSupplier"><option value="">— None —</option></select>
+                  <button class="btn btn-outline-secondary" type="button" id="pQuickAddSupBtn" title="Add new supplier"><i class="fas fa-plus"></i></button>
+                </div>
+              </div>
               <div class="col-6"><label class="form-label small">Opening Stock</label><input type="number" min="0" class="form-control" id="pStock"></div>
               <div class="col-6"><label class="form-label small">Cost Price</label><input type="number" min="0" class="form-control" id="pCost"></div>
               <div class="col-6"><label class="form-label small">Sale Price</label><input type="number" min="0" class="form-control" id="pPrice"></div>
@@ -1973,6 +2140,21 @@ PAGES.products = async function (mount, session) {
         </div>
       </div>
     </div>
+
+    <!-- Quick add supplier modal -->
+    <div class="modal fade" id="pQuickSupModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header"><h6 class="modal-title">Add Supplier</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body">
+            <div class="mb-2"><label class="form-label small">Supplier / company name</label><input class="form-control" id="pNewSupName"></div>
+            <div class="mb-2"><label class="form-label small">Phone</label><input class="form-control" id="pNewSupPhone"></div>
+            <div class="text-muted small">Manage this supplier's photo, wallet and credit later from the Purchases page.</div>
+          </div>
+          <div class="modal-footer"><button class="btn btn-brand" id="pSaveNewSupBtn">Save Supplier</button></div>
+        </div>
+      </div>
+    </div>
   `;
 
   function catName(id) { const c = categories.find(x => x.id === id); return c ? c.name : '—'; }
@@ -1980,6 +2162,30 @@ PAGES.products = async function (mount, session) {
   function fillCategorySelect() {
     document.getElementById('pCategory').innerHTML = categories.map(c => `<option value="${c.id}">${APP.escapeHtml(c.name)}</option>`).join('');
   }
+
+  function fillSupplierSelect() {
+    document.getElementById('pSupplier').innerHTML = '<option value="">— None —</option>' +
+      suppliers.map(s => `<option value="${s.id}">${APP.escapeHtml(s.name)}</option>`).join('');
+  }
+
+  document.getElementById('pQuickAddSupBtn').addEventListener('click', () => {
+    document.getElementById('pNewSupName').value = '';
+    document.getElementById('pNewSupPhone').value = '';
+    new bootstrap.Modal(document.getElementById('pQuickSupModal')).show();
+  });
+  document.getElementById('pSaveNewSupBtn').addEventListener('click', () => {
+    const name = document.getElementById('pNewSupName').value.trim();
+    if (!name) { APP.toast('Supplier name is required', 'warning'); return; }
+    const newSup = { id: DB.nextId('supplier'), name, phone: document.getElementById('pNewSupPhone').value.trim(), address: '', creditBalance: 0, walletBalance: 0 };
+    suppliers.push(newSup);
+    DB.saveSuppliers(suppliers);
+    fillSupplierSelect();
+    document.getElementById('pSupplier').value = newSup.id;
+    bootstrap.Modal.getInstance(document.getElementById('pQuickSupModal')).hide();
+    APP.toast('Supplier added');
+  });
+
+  function supName(id) { if (!id) return ''; const s = suppliers.find(x => x.id === id); return s ? s.name : ''; }
 
   function renderTable(term = '') {
     const t = term.trim().toLowerCase();
@@ -1990,6 +2196,7 @@ PAGES.products = async function (mount, session) {
         <td><div class="fw-semibold">${APP.escapeHtml(p.name)}</div><div class="text-muted small">${APP.escapeHtml(p.sku || '')}</div></td>
         <td>${APP.escapeHtml(catName(p.categoryId))}</td>
         <td>${APP.escapeHtml(p.brand || '')}</td>
+        <td class="small text-muted">${APP.escapeHtml(supName(p.supplierId))}</td>
         <td class="text-end">${APP.fmt(p.costPrice)}</td>
         <td class="text-end fw-semibold">${APP.fmt(p.salePrice)}</td>
         <td class="text-end"><span class="badge ${p.stock <= p.minStock ? 'badge-stock-low' : 'badge-stock-ok'}">${p.stock}</span></td>
@@ -1997,7 +2204,7 @@ PAGES.products = async function (mount, session) {
           <button class="btn btn-sm btn-outline-secondary editBtn" data-id="${p.id}"><i class="fas fa-pen"></i></button>
           <button class="btn btn-sm btn-outline-danger delBtn" data-id="${p.id}"><i class="fas fa-trash"></i></button>
         </td>
-      </tr>`).join('') : `<tr><td colspan="8" class="text-center text-muted py-4">No products found.</td></tr>`;
+      </tr>`).join('') : `<tr><td colspan="9" class="text-center text-muted py-4">No products found.</td></tr>`;
 
     document.getElementById('productsTbody').querySelectorAll('.editBtn').forEach(b => b.addEventListener('click', () => openEdit(Number(b.dataset.id))));
     document.getElementById('productsTbody').querySelectorAll('.delBtn').forEach(b => b.addEventListener('click', () => deleteProduct(Number(b.dataset.id))));
@@ -2030,6 +2237,8 @@ PAGES.products = async function (mount, session) {
     document.getElementById('pMinStock').value = 5;
     setPhotoPreview(null);
     fillCategorySelect();
+    fillSupplierSelect();
+    document.getElementById('pSupplier').value = '';
     new bootstrap.Modal(document.getElementById('productModal')).show();
   }
 
@@ -2039,10 +2248,12 @@ PAGES.products = async function (mount, session) {
     editingId = id;
     document.getElementById('productModalTitle').textContent = 'Edit Product';
     fillCategorySelect();
+    fillSupplierSelect();
     document.getElementById('pName').value = p.name;
     document.getElementById('pSku').value = p.sku || '';
     document.getElementById('pBrand').value = p.brand || '';
     document.getElementById('pCategory').value = p.categoryId;
+    document.getElementById('pSupplier').value = p.supplierId || '';
     document.getElementById('pStock').value = p.stock;
     document.getElementById('pCost').value = p.costPrice;
     document.getElementById('pPrice').value = p.salePrice;
@@ -2071,6 +2282,7 @@ PAGES.products = async function (mount, session) {
       sku: document.getElementById('pSku').value.trim(),
       brand: document.getElementById('pBrand').value.trim(),
       categoryId: Number(document.getElementById('pCategory').value),
+      supplierId: document.getElementById('pSupplier').value ? Number(document.getElementById('pSupplier').value) : null,
       stock: Number(document.getElementById('pStock').value) || 0,
       costPrice: Number(document.getElementById('pCost').value) || 0,
       salePrice: Number(document.getElementById('pPrice').value) || 0,
@@ -2483,6 +2695,9 @@ PAGES.purchases = async function (mount, session) {
   let suppliers = DB.getSuppliers();
   let purchases = DB.getPurchases();
   let lines = []; // {productId, name, qty, cost}
+  let editingSupId = null;
+  let walletSupId = null;
+  let currentSupPhoto = null;
 
   mount.innerHTML = `
     <div class="row g-3">
@@ -2495,7 +2710,11 @@ PAGES.purchases = async function (mount, session) {
           <div class="card-body">
             <div class="mb-2">
               <label class="form-label small">Supplier</label>
-              <select class="form-select" id="supplierSelect"></select>
+              <div class="input-group">
+                <select class="form-select" id="supplierSelect"></select>
+                <button class="btn btn-outline-secondary" type="button" id="quickAddSupBtn" title="Add new supplier"><i class="fas fa-plus"></i></button>
+              </div>
+              <div class="small mt-1" id="supInfoBox"></div>
             </div>
             <div class="row g-2 align-items-end mb-2">
               <div class="col-5">
@@ -2519,7 +2738,19 @@ PAGES.purchases = async function (mount, session) {
               <thead><tr><th>Product</th><th class="text-end">Qty</th><th class="text-end">Cost</th><th class="text-end">Line Total</th><th></th></tr></thead>
               <tbody id="linesBody"></tbody>
             </table>
-            <div class="text-end fw-bold fs-5" id="poTotal">Total: ${APP.fmt(0)}</div>
+            <div class="d-flex justify-content-between fw-bold fs-5"><span>Total</span><span id="poTotal">${APP.fmt(0)}</span></div>
+
+            <div class="form-check mt-2 d-none" id="poWalletWrap">
+              <input class="form-check-input" type="checkbox" id="poUseWalletChk" checked>
+              <label class="form-check-label small" for="poUseWalletChk" id="poWalletLabel">Use supplier wallet balance</label>
+            </div>
+            <div class="d-flex justify-content-between small text-success d-none" id="poWalletAppliedRow"><span>Wallet Applied</span><span id="poSumWalletApplied">${APP.fmt(0)}</span></div>
+
+            <div class="row g-2 mt-2">
+              <div class="col-12"><label class="form-label small">Amount Paid Now</label><input type="number" min="0" class="form-control" id="poAmountPaid" placeholder="0"></div>
+            </div>
+            <div class="alert alert-warning py-2 small mt-2 d-none" id="poCreditWarningBox"></div>
+
             <button class="btn btn-brand w-100 mt-2" id="savePOBtn" disabled><i class="fas fa-circle-check me-1"></i>Save Purchase & Update Stock</button>
           </div>
         </div>
@@ -2530,7 +2761,7 @@ PAGES.purchases = async function (mount, session) {
           <div class="card-header">Purchase History</div>
           <div class="card-body p-0" style="max-height: 520px; overflow-y:auto;">
             <table class="table table-sm mb-0">
-              <thead><tr><th>PO#</th><th>Supplier</th><th class="text-end">Total</th></tr></thead>
+              <thead><tr><th>PO#</th><th>Supplier</th><th class="text-end">Total</th><th class="text-end">Paid</th></tr></thead>
               <tbody id="poHistoryBody"></tbody>
             </table>
           </div>
@@ -2539,16 +2770,61 @@ PAGES.purchases = async function (mount, session) {
     </div>
 
     <div class="modal fade" id="supplierModal" tabindex="-1">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header"><h6 class="modal-title" id="supModalTitle">Manage Suppliers</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body">
+            <div class="row g-2 align-items-start mb-3">
+              <div class="col-auto text-center">
+                <img id="supPhotoPreview" src="" style="width:64px;height:64px;object-fit:cover;border-radius:12px;border:1px solid #e5e7f0;display:none;">
+                <div id="supPhotoPlaceholder" class="d-flex align-items-center justify-content-center" style="width:64px;height:64px;border-radius:12px;background:#f4f5fb;color:#aab;font-size:1.4rem;"><i class="fas fa-building"></i></div>
+                <button type="button" class="btn btn-outline-secondary btn-sm mt-1" id="supCaptureBtn" style="font-size:.68rem;"><i class="fas fa-camera"></i></button>
+              </div>
+              <div class="col"><input class="form-control mb-2" id="newSupName" placeholder="Supplier / company name"></div>
+              <div class="col-3"><input class="form-control mb-2" id="newSupPhone" placeholder="Phone"></div>
+            </div>
+            <div class="row g-2 mb-3">
+              <div class="col-8"><input class="form-control" id="newSupAddress" placeholder="Address (optional)"></div>
+              <div class="col-4"><button class="btn btn-brand w-100" id="addSupBtn">Save Supplier</button></div>
+            </div>
+            <hr>
+            <div class="table-responsive">
+              <table class="table table-sm align-middle">
+                <thead><tr><th></th><th>Supplier</th><th>Phone</th><th class="text-end">Wallet</th><th class="text-end">We Owe</th><th class="text-end">Actions</th></tr></thead>
+                <tbody id="supList"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="supWalletModal" tabindex="-1">
       <div class="modal-dialog">
         <div class="modal-content">
-          <div class="modal-header"><h6 class="modal-title">Manage Suppliers</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-header"><h6 class="modal-title">Wallet &amp; Credit — <span id="supWalletName"></span></h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
           <div class="modal-body">
             <div class="row g-2 mb-3">
-              <div class="col-5"><input class="form-control" id="newSupName" placeholder="Supplier name"></div>
-              <div class="col-4"><input class="form-control" id="newSupPhone" placeholder="Phone"></div>
-              <div class="col-3"><button class="btn btn-brand w-100" id="addSupBtn">Add</button></div>
+              <div class="col-6"><div class="kpi-card c2 h-100"><div class="kpi-label">Wallet (Advance Paid)</div><div class="kpi-value" id="supWalletCurBalance">-</div></div></div>
+              <div class="col-6"><div class="kpi-card c3 h-100"><div class="kpi-label">We Owe (Credit)</div><div class="kpi-value" id="supCreditCurBalance">-</div></div></div>
             </div>
-            <ul class="list-group" id="supList"></ul>
+            <hr>
+            <div class="mb-3">
+              <label class="form-label small fw-semibold">Pay Off Credit We Owe</label>
+              <div class="text-muted small mb-1">Record a payment made to the supplier against outstanding credit.</div>
+              <div class="input-group">
+                <input type="number" min="0" class="form-control" id="supCreditPayInput" placeholder="Amount paid">
+                <button class="btn btn-brand" id="applySupCreditPayBtn">Apply</button>
+              </div>
+            </div>
+            <div>
+              <label class="form-label small fw-semibold">Adjust Wallet (Advance Payment)</label>
+              <div class="text-muted small mb-1">Add an advance payment made to this supplier, or correct the balance (use negative to deduct).</div>
+              <div class="input-group">
+                <input type="number" class="form-control" id="supWalletAdjustInput" placeholder="Amount">
+                <button class="btn btn-brand" id="applySupWalletAdjustBtn">Apply</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -2560,12 +2836,43 @@ PAGES.purchases = async function (mount, session) {
     document.getElementById('lineProduct').innerHTML = products.map(p => `<option value="${p.id}" data-cost="${p.costPrice}">${APP.escapeHtml(p.name)}</option>`).join('');
     const first = products[0];
     if (first) document.getElementById('lineCost').value = first.costPrice;
+    updateSupplierInfoPanel();
+  }
+
+  function getSelectedSupplier() {
+    const id = Number(document.getElementById('supplierSelect').value);
+    return suppliers.find(s => s.id === id) || null;
+  }
+
+  function updateSupplierInfoPanel() {
+    const sup = getSelectedSupplier();
+    const box = document.getElementById('supInfoBox');
+    const walletWrap = document.getElementById('poWalletWrap');
+    if (!sup) { box.innerHTML = ''; walletWrap.classList.add('d-none'); recalcPO(); return; }
+    const wallet = sup.walletBalance || 0;
+    const credit = sup.creditBalance || 0;
+    let html = '';
+    if (wallet > 0) html += `<span class="badge badge-stock-ok me-1"><i class="fas fa-wallet"></i> Wallet: ${APP.fmt(wallet)}</span>`;
+    if (credit > 0) html += `<span class="badge badge-stock-low"><i class="fas fa-triangle-exclamation"></i> We Owe: ${APP.fmt(credit)}</span>`;
+    box.innerHTML = html;
+    if (wallet > 0) {
+      walletWrap.classList.remove('d-none');
+      document.getElementById('poUseWalletChk').checked = true;
+      document.getElementById('poWalletLabel').textContent = `Use supplier wallet balance (${APP.fmt(wallet)} available)`;
+    } else {
+      walletWrap.classList.add('d-none');
+      document.getElementById('poUseWalletChk').checked = false;
+    }
+    recalcPO();
   }
 
   document.getElementById('lineProduct').addEventListener('change', (e) => {
     const opt = e.target.selectedOptions[0];
     document.getElementById('lineCost').value = opt ? opt.dataset.cost : 0;
   });
+  document.getElementById('supplierSelect').addEventListener('change', updateSupplierInfoPanel);
+  document.getElementById('poUseWalletChk').addEventListener('change', recalcPO);
+  document.getElementById('poAmountPaid').addEventListener('input', recalcPO);
 
   function renderLines() {
     document.getElementById('linesBody').innerHTML = lines.length ? lines.map((l, idx) => `
@@ -2579,9 +2886,35 @@ PAGES.purchases = async function (mount, session) {
     document.getElementById('linesBody').querySelectorAll('.removeLine').forEach(b => b.addEventListener('click', () => {
       lines.splice(Number(b.dataset.idx), 1); renderLines();
     }));
+    recalcPO();
+  }
+
+  function recalcPO() {
     const total = lines.reduce((s, l) => s + l.qty * l.cost, 0);
-    document.getElementById('poTotal').textContent = 'Total: ' + APP.fmt(total);
+    document.getElementById('poTotal').textContent = APP.fmt(total);
+
+    const sup = getSelectedSupplier();
+    const useWallet = document.getElementById('poUseWalletChk').checked && sup;
+    const walletApplied = useWallet ? Math.min(sup.walletBalance || 0, total) : 0;
+    const walletRow = document.getElementById('poWalletAppliedRow');
+    if (walletApplied > 0) { walletRow.classList.remove('d-none'); document.getElementById('poSumWalletApplied').textContent = '- ' + APP.fmt(walletApplied); }
+    else walletRow.classList.add('d-none');
+
+    const paid = Number(document.getElementById('poAmountPaid').value) || 0;
+    const effectivePaid = paid + walletApplied;
+    const diff = effectivePaid - total;
+    const creditBox = document.getElementById('poCreditWarningBox');
+    if (diff < 0 && lines.length) {
+      creditBox.classList.remove('d-none');
+      creditBox.innerHTML = sup
+        ? `<i class="fas fa-triangle-exclamation me-1"></i>Rs ${Math.abs(diff).toLocaleString()} short — this will be added as credit we owe ${APP.escapeHtml(sup.name)}.`
+        : `<i class="fas fa-triangle-exclamation me-1"></i>Select a supplier to track this shortfall as credit.`;
+    } else {
+      creditBox.classList.add('d-none');
+    }
+
     document.getElementById('savePOBtn').disabled = lines.length === 0;
+    return { total, walletApplied, paid, effectivePaid, diff };
   }
 
   document.getElementById('addLineBtn').addEventListener('click', () => {
@@ -2603,14 +2936,19 @@ PAGES.purchases = async function (mount, session) {
         <td class="fw-semibold small">${po.poNo}<div class="text-muted">${APP.fmtDate(po.date)}</div></td>
         <td class="small">${APP.escapeHtml(po.supplierName)}</td>
         <td class="text-end">${APP.fmt(po.total)}</td>
-      </tr>`).join('') : `<tr><td colspan="3" class="text-center text-muted py-4">No purchases recorded yet.</td></tr>`;
+        <td class="text-end">${APP.fmt(po.paid != null ? po.paid : po.total)}</td>
+      </tr>`).join('') : `<tr><td colspan="4" class="text-center text-muted py-4">No purchases recorded yet.</td></tr>`;
   }
 
   document.getElementById('savePOBtn').addEventListener('click', () => {
     if (!lines.length) return;
-    const supId = Number(document.getElementById('supplierSelect').value);
-    const supplier = suppliers.find(s => s.id === supId);
-    const total = lines.reduce((s, l) => s + l.qty * l.cost, 0);
+    const sup = getSelectedSupplier();
+    const totals = recalcPO();
+
+    if (totals.diff < 0) {
+      if (!sup) { APP.toast('Select a supplier first', 'warning'); return; }
+      if (!APP.confirmAction(`Rs ${Math.abs(totals.diff).toLocaleString()} will be added as credit we owe ${sup.name}. Continue?`)) return;
+    }
 
     // update stock + cost price
     products = products.map(p => {
@@ -2619,35 +2957,74 @@ PAGES.purchases = async function (mount, session) {
     });
     DB.saveProducts(products);
 
+    // Update supplier wallet/credit
+    if (sup) {
+      suppliers = suppliers.map(s => {
+        if (s.id !== sup.id) return s;
+        let wallet = s.walletBalance || 0;
+        let credit = s.creditBalance || 0;
+        if (totals.walletApplied > 0) wallet -= totals.walletApplied;
+        if (totals.diff < 0) credit += Math.abs(totals.diff);
+        return { ...s, walletBalance: Math.max(wallet, 0), creditBalance: Math.max(credit, 0) };
+      });
+      DB.saveSuppliers(suppliers);
+    }
+
     const po = {
       id: DB.nextId('purchase'),
       poNo: DB.nextPONo(),
       date: new Date().toISOString(),
-      supplierId: supId,
-      supplierName: supplier ? supplier.name : '—',
+      supplierId: sup ? sup.id : null,
+      supplierName: sup ? sup.name : '—',
       items: lines,
-      total,
+      total: totals.total,
+      walletApplied: totals.walletApplied,
+      paid: totals.effectivePaid,
+      creditAdded: totals.diff < 0 ? Math.abs(totals.diff) : 0,
       userId: session.userId,
       userName: session.fullName
     };
     purchases.push(po);
     DB.savePurchases(purchases);
-    DB.logActivity(session.fullName, 'Purchase', `${po.poNo} — ${APP.fmt(total)}`);
+    DB.logActivity(session.fullName, 'Purchase', `${po.poNo} — ${APP.fmt(totals.total)}`);
 
     lines = [];
+    document.getElementById('poAmountPaid').value = '';
     renderLines();
     renderHistory();
     fillSelects();
     APP.toast('Purchase saved — stock updated');
   });
 
-  // ---- suppliers ----
+  // ---- suppliers management ----
+  function setSupPhotoPreview(dataUrl) {
+    currentSupPhoto = dataUrl || null;
+    const img = document.getElementById('supPhotoPreview');
+    const placeholder = document.getElementById('supPhotoPlaceholder');
+    if (currentSupPhoto) { img.src = currentSupPhoto; img.style.display = 'block'; placeholder.style.display = 'none'; }
+    else { img.style.display = 'none'; placeholder.style.display = 'flex'; }
+  }
+
+  document.getElementById('supCaptureBtn').addEventListener('click', async () => {
+    const dataUrl = await APP.captureImage('Supplier Photo');
+    if (dataUrl) setSupPhotoPreview(dataUrl);
+  });
+
   function renderSupList() {
-    document.getElementById('supList').innerHTML = suppliers.map(s => `
-      <li class="list-group-item d-flex justify-content-between align-items-center">
-        <div><div class="fw-semibold">${APP.escapeHtml(s.name)}</div><div class="small text-muted">${APP.escapeHtml(s.phone || '')}</div></div>
-        <button class="btn btn-sm btn-outline-danger delSupBtn" data-id="${s.id}"><i class="fas fa-trash"></i></button>
-      </li>`).join('');
+    document.getElementById('supList').innerHTML = suppliers.length ? suppliers.map(s => `
+      <tr>
+        <td>${s.photo ? `<img src="${s.photo}" style="width:32px;height:32px;object-fit:cover;border-radius:8px;">` : `<div style="width:32px;height:32px;border-radius:8px;background:#f4f5fb;color:#aab;display:flex;align-items:center;justify-content:center;"><i class="fas fa-building"></i></div>`}</td>
+        <td class="fw-semibold small">${APP.escapeHtml(s.name)}</td>
+        <td class="small">${APP.escapeHtml(s.phone || '—')}</td>
+        <td class="text-end">${(s.walletBalance || 0) > 0 ? `<span class="badge badge-stock-ok">${APP.fmt(s.walletBalance)}</span>` : '—'}</td>
+        <td class="text-end">${(s.creditBalance || 0) > 0 ? `<span class="badge badge-stock-low">${APP.fmt(s.creditBalance)}</span>` : '—'}</td>
+        <td class="text-end">
+          <button class="btn btn-sm btn-outline-primary supWalletBtn" data-id="${s.id}" title="Wallet & Credit"><i class="fas fa-wallet"></i></button>
+          <button class="btn btn-sm btn-outline-secondary editSupBtn" data-id="${s.id}"><i class="fas fa-pen"></i></button>
+          <button class="btn btn-sm btn-outline-danger delSupBtn" data-id="${s.id}"><i class="fas fa-trash"></i></button>
+        </td>
+      </tr>`).join('') : `<tr><td colspan="6" class="text-center text-muted py-3">No suppliers yet.</td></tr>`;
+
     document.getElementById('supList').querySelectorAll('.delSupBtn').forEach(b => b.addEventListener('click', () => {
       const id = Number(b.dataset.id);
       if (purchases.some(p => p.supplierId === id)) { APP.toast('Cannot delete: purchase history exists', 'warning'); return; }
@@ -2655,19 +3032,103 @@ PAGES.purchases = async function (mount, session) {
       DB.saveSuppliers(suppliers);
       renderSupList(); fillSelects();
     }));
+    document.getElementById('supList').querySelectorAll('.editSupBtn').forEach(b => b.addEventListener('click', () => openEditSupplier(Number(b.dataset.id))));
+    document.getElementById('supList').querySelectorAll('.supWalletBtn').forEach(b => b.addEventListener('click', () => openSupWallet(Number(b.dataset.id))));
   }
+
+  function resetSupplierForm() {
+    editingSupId = null;
+    document.getElementById('supModalTitle').textContent = 'Manage Suppliers';
+    document.getElementById('newSupName').value = '';
+    document.getElementById('newSupPhone').value = '';
+    document.getElementById('newSupAddress').value = '';
+    document.getElementById('addSupBtn').textContent = 'Save Supplier';
+    setSupPhotoPreview(null);
+  }
+
+  function openEditSupplier(id) {
+    const s = suppliers.find(x => x.id === id);
+    if (!s) return;
+    editingSupId = id;
+    document.getElementById('supModalTitle').textContent = 'Edit Supplier';
+    document.getElementById('newSupName').value = s.name;
+    document.getElementById('newSupPhone').value = s.phone || '';
+    document.getElementById('newSupAddress').value = s.address || '';
+    document.getElementById('addSupBtn').textContent = 'Update Supplier';
+    setSupPhotoPreview(s.photo || null);
+  }
+
   document.getElementById('manageSupBtn').addEventListener('click', () => {
+    resetSupplierForm();
     renderSupList();
     new bootstrap.Modal(document.getElementById('supplierModal')).show();
   });
+  document.getElementById('quickAddSupBtn').addEventListener('click', () => {
+    resetSupplierForm();
+    renderSupList();
+    new bootstrap.Modal(document.getElementById('supplierModal')).show();
+  });
+
   document.getElementById('addSupBtn').addEventListener('click', () => {
     const name = document.getElementById('newSupName').value.trim();
-    if (!name) return;
-    suppliers.push({ id: DB.nextId('supplier'), name, phone: document.getElementById('newSupPhone').value.trim(), address: '' });
+    if (!name) { APP.toast('Supplier name is required', 'warning'); return; }
+    const data = {
+      name,
+      phone: document.getElementById('newSupPhone').value.trim(),
+      address: document.getElementById('newSupAddress').value.trim(),
+      photo: currentSupPhoto
+    };
+    if (editingSupId) {
+      suppliers = suppliers.map(s => s.id === editingSupId ? { ...s, ...data } : s);
+      APP.toast('Supplier updated');
+    } else {
+      const newSup = { id: DB.nextId('supplier'), ...data, creditBalance: 0, walletBalance: 0 };
+      suppliers.push(newSup);
+      document.getElementById('supplierSelect').value = newSup.id;
+      APP.toast('Supplier added');
+    }
     DB.saveSuppliers(suppliers);
-    document.getElementById('newSupName').value = '';
-    document.getElementById('newSupPhone').value = '';
+    resetSupplierForm();
     renderSupList(); fillSelects();
+  });
+
+  // ---- supplier wallet & credit modal ----
+  function openSupWallet(id) {
+    const s = suppliers.find(x => x.id === id);
+    if (!s) return;
+    walletSupId = id;
+    document.getElementById('supWalletName').textContent = s.name;
+    document.getElementById('supWalletCurBalance').textContent = APP.fmt(s.walletBalance || 0);
+    document.getElementById('supCreditCurBalance').textContent = APP.fmt(s.creditBalance || 0);
+    document.getElementById('supCreditPayInput').value = '';
+    document.getElementById('supWalletAdjustInput').value = '';
+    new bootstrap.Modal(document.getElementById('supWalletModal')).show();
+  }
+
+  document.getElementById('applySupCreditPayBtn').addEventListener('click', () => {
+    const amount = Number(document.getElementById('supCreditPayInput').value) || 0;
+    if (amount <= 0) { APP.toast('Enter a valid amount', 'warning'); return; }
+    suppliers = suppliers.map(s => s.id === walletSupId ? { ...s, creditBalance: Math.max((s.creditBalance || 0) - amount, 0) } : s);
+    DB.saveSuppliers(suppliers);
+    const s = suppliers.find(x => x.id === walletSupId);
+    DB.logActivity(session.fullName, 'Supplier Credit Payment', `${s.name} — ${APP.fmt(amount)}`);
+    document.getElementById('supCreditCurBalance').textContent = APP.fmt(s.creditBalance || 0);
+    document.getElementById('supCreditPayInput').value = '';
+    renderSupList(); fillSelects();
+    APP.toast('Credit payment recorded');
+  });
+
+  document.getElementById('applySupWalletAdjustBtn').addEventListener('click', () => {
+    const amount = Number(document.getElementById('supWalletAdjustInput').value) || 0;
+    if (amount === 0) { APP.toast('Enter a non-zero amount', 'warning'); return; }
+    suppliers = suppliers.map(s => s.id === walletSupId ? { ...s, walletBalance: Math.max((s.walletBalance || 0) + amount, 0) } : s);
+    DB.saveSuppliers(suppliers);
+    const s = suppliers.find(x => x.id === walletSupId);
+    DB.logActivity(session.fullName, 'Supplier Wallet Adjusted', `${s.name} — ${amount > 0 ? '+' : ''}${APP.fmt(amount)}`);
+    document.getElementById('supWalletCurBalance').textContent = APP.fmt(s.walletBalance || 0);
+    document.getElementById('supWalletAdjustInput').value = '';
+    renderSupList(); fillSelects();
+    APP.toast('Wallet balance updated');
   });
 
   fillSelects();
@@ -3341,6 +3802,7 @@ PAGES.mobilebanking = async function (mount, session) {
   const canManageAccounts = session.role === 'admin' || session.role === 'manager';
   let accounts = DB.getMbAccounts();
   let txns = DB.getMbTransactions();
+  let suppliers = DB.getSuppliers();
   let currentTxnPhoto = null;
 
   const TYPE_LABELS = {
@@ -3348,7 +3810,8 @@ PAGES.mobilebanking = async function (mount, session) {
     send: 'Send Money / Mobile Load',
     cashin: 'Cash In (Load Account)',
     cashout: 'Cash Out (Withdraw)',
-    sale: 'POS Sale Payment Received'
+    sale: 'POS Sale Payment Received',
+    supplier_payment: 'Pay Supplier'
   };
 
   mount.innerHTML = `
@@ -3369,6 +3832,7 @@ PAGES.mobilebanking = async function (mount, session) {
                 <option value="send">Send Money / Mobile Load</option>
                 <option value="cashin">Cash In (Load Account)</option>
                 <option value="cashout">Cash Out (Withdraw)</option>
+                <option value="supplier_payment">Pay Supplier</option>
               </select>
             </div>
             <div class="mb-2">
@@ -3378,6 +3842,14 @@ PAGES.mobilebanking = async function (mount, session) {
             <div class="mb-2" id="billerField">
               <label class="form-label small" id="billerLabel">Biller / Company Name</label>
               <input class="form-control" id="txnBiller" placeholder="e.g. K-Electric, SSGC, PTCL">
+            </div>
+            <div class="mb-2 d-none" id="supplierField">
+              <label class="form-label small">Supplier</label>
+              <div class="input-group">
+                <select class="form-select" id="txnSupplier"></select>
+                <button class="btn btn-outline-secondary" type="button" id="txnQuickAddSupBtn" title="Add new supplier"><i class="fas fa-plus"></i></button>
+              </div>
+              <div class="small mt-1" id="txnSupInfoBox"></div>
             </div>
             <div class="row g-2 mb-2">
               <div class="col-6"><label class="form-label small">Customer Name</label><input class="form-control" id="txnCustName"></div>
@@ -3392,6 +3864,13 @@ PAGES.mobilebanking = async function (mount, session) {
               <div class="col-6"><label class="form-label small">Amount</label><input type="number" min="0" class="form-control" id="txnAmount"></div>
               <div class="col-6"><label class="form-label small">Your Commission</label><input type="number" min="0" class="form-control" id="txnCommission" value="0"></div>
             </div>
+            <div class="mb-2">
+              <label class="form-label small">Payment Mode</label>
+              <select class="form-select" id="txnPaymentMode">
+                <option value="cash">Cash</option>
+                <option value="credit">Credit (not yet settled)</option>
+              </select>
+            </div>
             <div class="mb-2"><label class="form-label small">Note (optional)</label><input class="form-control" id="txnNote"></div>
             <button class="btn btn-brand w-100 mt-1" id="saveTxnBtn"><i class="fas fa-circle-check me-1"></i>Record Transaction</button>
           </div>
@@ -3403,7 +3882,7 @@ PAGES.mobilebanking = async function (mount, session) {
           <div class="card-header">Transaction History</div>
           <div class="card-body p-0" style="max-height: 560px; overflow-y:auto;">
             <table class="table table-sm mb-0">
-              <thead><tr><th></th><th>Date</th><th>Type</th><th>Account</th><th>Customer</th><th class="text-end">Amount</th><th class="text-end">Commission</th><th class="text-end">Receipt</th></tr></thead>
+              <thead><tr><th></th><th>Date</th><th>Type</th><th>Account</th><th>Customer</th><th>Mode</th><th class="text-end">Amount</th><th class="text-end">Commission</th><th class="text-end">Receipt</th></tr></thead>
               <tbody id="txnBody"></tbody>
             </table>
           </div>
@@ -3427,14 +3906,34 @@ PAGES.mobilebanking = async function (mount, session) {
           <div class="modal-header"><h6 class="modal-title">Manage Mobile Accounts</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
           <div class="modal-body">
             <div class="row g-2 mb-3">
-              <div class="col-3"><input class="form-control" id="newAcctProvider" placeholder="Provider (e.g. JazzCash)"></div>
+              <div class="col-2">
+                <select class="form-select" id="newAcctType">
+                  <option value="wallet">Mobile Wallet</option>
+                  <option value="bank">Bank Account</option>
+                </select>
+              </div>
+              <div class="col-2"><input class="form-control" id="newAcctProvider" placeholder="Provider (e.g. JazzCash / HBL)"></div>
               <div class="col-3"><input class="form-control" id="newAcctLabel" placeholder="Label (e.g. Shop Merchant)"></div>
-              <div class="col-3"><input class="form-control" id="newAcctNumber" placeholder="Account / Mobile No."></div>
+              <div class="col-2"><input class="form-control" id="newAcctNumber" placeholder="Account / Mobile No."></div>
               <div class="col-2"><input type="number" class="form-control" id="newAcctOpening" placeholder="Opening Bal."></div>
               <div class="col-1"><button class="btn btn-brand w-100" id="addAcctBtn"><i class="fas fa-plus"></i></button></div>
             </div>
             <ul class="list-group" id="acctList"></ul>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="txnQuickSupModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header"><h6 class="modal-title">Add Supplier</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body">
+            <div class="mb-2"><label class="form-label small">Supplier / company name</label><input class="form-control" id="txnNewSupName"></div>
+            <div class="mb-2"><label class="form-label small">Phone</label><input class="form-control" id="txnNewSupPhone"></div>
+            <div class="text-muted small">Manage this supplier's photo, wallet and credit later from the Purchases page.</div>
+          </div>
+          <div class="modal-footer"><button class="btn btn-brand" id="txnSaveNewSupBtn">Save Supplier</button></div>
         </div>
       </div>
     </div>
@@ -3456,27 +3955,59 @@ PAGES.mobilebanking = async function (mount, session) {
     document.getElementById('acctCards').innerHTML = accounts.length ? accounts.map((a, i) => `
       <div class="col-6 col-lg-3">
         <div class="kpi-card ${colors[i % colors.length]} h-100">
-          <div class="kpi-label">${APP.escapeHtml(a.provider)} — ${APP.escapeHtml(a.label)}</div>
+          <div class="kpi-label"><i class="fas ${a.type === 'bank' ? 'fa-building-columns' : 'fa-mobile-screen'} me-1"></i>${APP.escapeHtml(a.provider)} — ${APP.escapeHtml(a.label)}</div>
           <div class="kpi-value">${APP.fmt(balanceOf(a.id))}</div>
           <div class="kpi-label">${APP.escapeHtml(a.accountNumber)}</div>
         </div>
-      </div>`).join('') : `<div class="col-12"><div class="alert alert-warning mb-0">No mobile accounts set up yet. ${canManageAccounts ? 'Click "Accounts" to add JazzCash / EasyPaisa.' : 'Ask an admin to add JazzCash / EasyPaisa accounts.'}</div></div>`;
+      </div>`).join('') : `<div class="col-12"><div class="alert alert-warning mb-0">No mobile accounts set up yet. ${canManageAccounts ? 'Click "Accounts" to add JazzCash / EasyPaisa / Bank.' : 'Ask an admin to add JazzCash / EasyPaisa / Bank accounts.'}</div></div>`;
   }
 
   function fillAccountSelect() {
-    document.getElementById('txnAccount').innerHTML = accounts.map(a => `<option value="${a.id}">${APP.escapeHtml(a.provider)} - ${APP.escapeHtml(a.label)} (${APP.escapeHtml(a.accountNumber)})</option>`).join('');
+    document.getElementById('txnAccount').innerHTML = accounts.map(a => `<option value="${a.id}">${a.type === 'bank' ? '[Bank] ' : '[Wallet] '}${APP.escapeHtml(a.provider)} - ${APP.escapeHtml(a.label)} (${APP.escapeHtml(a.accountNumber)})</option>`).join('');
   }
 
   function updateBillerFieldLabel() {
     const type = document.getElementById('txnType').value;
     const wrap = document.getElementById('billerField');
+    const supWrap = document.getElementById('supplierField');
     const label = document.getElementById('billerLabel');
     const input = document.getElementById('txnBiller');
-    if (type === 'bill') { wrap.classList.remove('d-none'); label.textContent = 'Biller / Company Name'; input.placeholder = 'e.g. K-Electric, SSGC, PTCL'; }
-    else if (type === 'send') { wrap.classList.remove('d-none'); label.textContent = 'Receiver Number'; input.placeholder = 'e.g. 0300-XXXXXXX'; }
-    else { wrap.classList.add('d-none'); }
+    if (type === 'bill') { wrap.classList.remove('d-none'); supWrap.classList.add('d-none'); label.textContent = 'Biller / Company Name'; input.placeholder = 'e.g. K-Electric, SSGC, PTCL'; }
+    else if (type === 'send') { wrap.classList.remove('d-none'); supWrap.classList.add('d-none'); label.textContent = 'Receiver Number'; input.placeholder = 'e.g. 0300-XXXXXXX'; }
+    else if (type === 'supplier_payment') { wrap.classList.add('d-none'); supWrap.classList.remove('d-none'); updateTxnSupInfo(); }
+    else { wrap.classList.add('d-none'); supWrap.classList.add('d-none'); }
   }
   document.getElementById('txnType').addEventListener('change', updateBillerFieldLabel);
+
+  function fillTxnSupplierSelect() {
+    document.getElementById('txnSupplier').innerHTML = suppliers.map(s => `<option value="${s.id}">${APP.escapeHtml(s.name)}</option>`).join('');
+  }
+  function updateTxnSupInfo() {
+    const id = Number(document.getElementById('txnSupplier').value);
+    const sup = suppliers.find(s => s.id === id);
+    const box = document.getElementById('txnSupInfoBox');
+    if (!sup) { box.innerHTML = ''; return; }
+    const credit = sup.creditBalance || 0;
+    box.innerHTML = credit > 0 ? `<span class="badge badge-stock-low"><i class="fas fa-triangle-exclamation"></i> We Owe: ${APP.fmt(credit)}</span>` : '';
+  }
+  document.getElementById('txnSupplier').addEventListener('change', updateTxnSupInfo);
+  document.getElementById('txnQuickAddSupBtn').addEventListener('click', () => {
+    document.getElementById('txnNewSupName').value = '';
+    document.getElementById('txnNewSupPhone').value = '';
+    new bootstrap.Modal(document.getElementById('txnQuickSupModal')).show();
+  });
+  document.getElementById('txnSaveNewSupBtn').addEventListener('click', () => {
+    const name = document.getElementById('txnNewSupName').value.trim();
+    if (!name) { APP.toast('Supplier name is required', 'warning'); return; }
+    const newSup = { id: DB.nextId('supplier'), name, phone: document.getElementById('txnNewSupPhone').value.trim(), address: '', creditBalance: 0, walletBalance: 0 };
+    suppliers.push(newSup);
+    DB.saveSuppliers(suppliers);
+    fillTxnSupplierSelect();
+    document.getElementById('txnSupplier').value = newSup.id;
+    updateTxnSupInfo();
+    bootstrap.Modal.getInstance(document.getElementById('txnQuickSupModal')).hide();
+    APP.toast('Supplier added');
+  });
 
   function setTxnPhoto(dataUrl) {
     currentTxnPhoto = dataUrl || null;
@@ -3502,11 +4033,12 @@ PAGES.mobilebanking = async function (mount, session) {
         <td><span class="badge bg-light text-dark border">${TYPE_LABELS[t.type] || t.type}</span></td>
         <td class="small">${acct ? APP.escapeHtml(acct.provider) : '—'}</td>
         <td class="small">${APP.escapeHtml(t.custName || '—')}${t.biller ? ' · ' + APP.escapeHtml(t.biller) : ''}</td>
+        <td class="small">${t.paymentMode === 'credit' ? '<span class="badge badge-stock-low">Credit</span>' : '<span class="badge badge-stock-ok">Cash</span>'}</td>
         <td class="text-end">${APP.fmt(t.amount)}</td>
         <td class="text-end text-success">${t.commission ? '+' + APP.fmt(t.commission) : '—'}</td>
         <td class="text-end"><button class="btn btn-sm btn-outline-secondary viewTxnBtn" data-id="${t.id}" data-ro-safe="true"><i class="fas fa-receipt me-1"></i>Print</button></td>
       </tr>`;
-    }).join('') : `<tr><td colspan="8" class="text-center text-muted py-4">No transactions recorded yet.</td></tr>`;
+    }).join('') : `<tr><td colspan="9" class="text-center text-muted py-4">No transactions recorded yet.</td></tr>`;
     document.getElementById('txnBody').querySelectorAll('.viewTxnBtn').forEach(b => b.addEventListener('click', () => showTxnReceipt(Number(b.dataset.id))));
   }
 
@@ -3531,10 +4063,12 @@ PAGES.mobilebanking = async function (mount, session) {
         <div>Account: ${acct ? APP.escapeHtml(acct.provider + ' - ' + acct.label) : '—'}</div>
         <div>Account No: ${acct ? APP.escapeHtml(acct.accountNumber) : '—'}</div>
         ${t.biller ? `<div>Biller / Receiver: ${APP.escapeHtml(t.biller)}</div>` : ''}
+        ${t.supplierId ? `<div>Supplier: ${APP.escapeHtml((suppliers.find(s => s.id === t.supplierId) || {}).name || '')}</div>` : ''}
         ${t.custName ? `<div>Customer: ${APP.escapeHtml(t.custName)}${t.custPhone ? ' (' + APP.escapeHtml(t.custPhone) + ')' : ''}</div>` : ''}
         ${t.note ? `<div>Note: ${APP.escapeHtml(t.note)}</div>` : ''}
         <hr>
         <div class="d-flex justify-content-between fw-bold"><span>Amount</span><span>${APP.fmt(t.amount)}</span></div>
+        <div>Payment Mode: ${t.paymentMode === 'credit' ? 'Credit (not yet settled)' : 'Cash'}</div>
         ${t.commission ? `<div class="d-flex justify-content-between"><span>Your Commission</span><span>+${APP.fmt(t.commission)}</span></div>` : ''}
         <hr>
         <div class="text-center small">${APP.escapeHtml(settings.receiptFooter || '')}</div>
@@ -3552,8 +4086,14 @@ PAGES.mobilebanking = async function (mount, session) {
     if (amount <= 0) { APP.toast('Enter a valid amount', 'warning'); return; }
     const commission = Number(document.getElementById('txnCommission').value) || 0;
 
-    if ((type === 'bill' || type === 'send' || type === 'cashout') && balanceOf(accountId) < amount) {
+    if ((type === 'bill' || type === 'send' || type === 'cashout' || type === 'supplier_payment') && balanceOf(accountId) < amount) {
       if (!APP.confirmAction('This account balance looks lower than the transaction amount. Continue anyway?')) return;
+    }
+
+    let supplierId = null;
+    if (type === 'supplier_payment') {
+      supplierId = Number(document.getElementById('txnSupplier').value) || null;
+      if (!supplierId) { APP.toast('Select a supplier', 'warning'); return; }
     }
 
     const txn = {
@@ -3562,11 +4102,13 @@ PAGES.mobilebanking = async function (mount, session) {
       type,
       accountId,
       biller: document.getElementById('txnBiller').value.trim(),
+      supplierId,
       custName: document.getElementById('txnCustName').value.trim(),
       custPhone: document.getElementById('txnCustPhone').value.trim(),
       custPhoto: currentTxnPhoto || null,
       amount,
       commission,
+      paymentMode: document.getElementById('txnPaymentMode').value,
       note: document.getElementById('txnNote').value.trim(),
       userId: session.userId,
       userName: session.fullName
@@ -3575,8 +4117,15 @@ PAGES.mobilebanking = async function (mount, session) {
     DB.saveMbTransactions(txns);
     DB.logActivity(session.fullName, 'Mobile Banking Txn', `${TYPE_LABELS[type]} — ${APP.fmt(amount)}`);
 
+    if (type === 'supplier_payment' && supplierId) {
+      suppliers = suppliers.map(s => s.id === supplierId ? { ...s, creditBalance: Math.max((s.creditBalance || 0) - amount, 0) } : s);
+      DB.saveSuppliers(suppliers);
+      updateTxnSupInfo();
+    }
+
     ['txnBiller', 'txnCustName', 'txnCustPhone', 'txnAmount', 'txnNote'].forEach(id => document.getElementById(id).value = '');
     document.getElementById('txnCommission').value = 0;
+    document.getElementById('txnPaymentMode').value = 'cash';
     setTxnPhoto(null);
 
     renderAccountCards();
@@ -3590,7 +4139,7 @@ PAGES.mobilebanking = async function (mount, session) {
     if (!list) return;
     list.innerHTML = accounts.map(a => `
       <li class="list-group-item d-flex justify-content-between align-items-center">
-        <div><div class="fw-semibold">${APP.escapeHtml(a.provider)} — ${APP.escapeHtml(a.label)}</div><div class="small text-muted">${APP.escapeHtml(a.accountNumber)} · Opening: ${APP.fmt(a.openingBalance)}</div></div>
+        <div><div class="fw-semibold"><i class="fas ${a.type === 'bank' ? 'fa-building-columns' : 'fa-mobile-screen'} me-1"></i>${APP.escapeHtml(a.provider)} — ${APP.escapeHtml(a.label)}</div><div class="small text-muted">${APP.escapeHtml(a.accountNumber)} · Opening: ${APP.fmt(a.openingBalance)}</div></div>
         <button class="btn btn-sm btn-outline-danger delAcctBtn" data-id="${a.id}"><i class="fas fa-trash"></i></button>
       </li>`).join('');
     list.querySelectorAll('.delAcctBtn').forEach(b => b.addEventListener('click', () => {
@@ -3608,12 +4157,13 @@ PAGES.mobilebanking = async function (mount, session) {
       new bootstrap.Modal(document.getElementById('acctModal')).show();
     });
     document.getElementById('addAcctBtn').addEventListener('click', () => {
+      const type = document.getElementById('newAcctType').value;
       const provider = document.getElementById('newAcctProvider').value.trim();
       const label = document.getElementById('newAcctLabel').value.trim();
       const accountNumber = document.getElementById('newAcctNumber').value.trim();
       const openingBalance = Number(document.getElementById('newAcctOpening').value) || 0;
       if (!provider || !accountNumber) { APP.toast('Provider and account number are required', 'warning'); return; }
-      accounts.push({ id: DB.nextId('mbAccount'), provider, label: label || provider, accountNumber, openingBalance });
+      accounts.push({ id: DB.nextId('mbAccount'), type, provider, label: label || provider, accountNumber, openingBalance });
       DB.saveMbAccounts(accounts);
       ['newAcctProvider', 'newAcctLabel', 'newAcctNumber', 'newAcctOpening'].forEach(id => document.getElementById(id).value = '');
       renderAcctList(); fillAccountSelect(); renderAccountCards();
@@ -3621,8 +4171,9 @@ PAGES.mobilebanking = async function (mount, session) {
     });
   }
 
-  updateBillerFieldLabel();
   fillAccountSelect();
+  fillTxnSupplierSelect();
+  updateBillerFieldLabel();
   renderAccountCards();
   renderTxnHistory();
 };
@@ -4103,6 +4654,248 @@ PAGES.attendance = async function (mount, session) {
   renderAdminSection();
 };
 
+
+PAGES.expenses = async function (mount, session) {
+
+  let expenses = DB.getExpenses();
+  const users = DB.getUsers();
+  let editingId = null;
+
+  const CATEGORIES = ['Rent', 'Utilities (Electricity/Gas/Water)', 'Transport', 'Tea / Refreshments', 'Repairs & Maintenance', 'Stationery', 'Salaries/Advance', 'Other'];
+  const approvers = users.filter(u => u.role === 'admin' || u.role === 'manager');
+
+  mount.innerHTML = `
+    <div class="row g-3">
+      <div class="col-lg-5">
+        <div class="card mb-3">
+          <div class="card-header"><i class="fas fa-receipt me-1"></i><span id="expFormTitle">Record Expense</span></div>
+          <div class="card-body">
+            <div class="row g-2">
+              <div class="col-6"><label class="form-label small">Date</label><input type="date" class="form-control" id="expDate"></div>
+              <div class="col-6"><label class="form-label small">Amount</label><input type="number" min="0" class="form-control" id="expAmount"></div>
+              <div class="col-12"><label class="form-label small">Category</label>
+                <select class="form-select" id="expCategory">${CATEGORIES.map(c => `<option>${c}</option>`).join('')}</select>
+              </div>
+              <div class="col-12"><label class="form-label small">Note / Reason</label><input class="form-control" id="expNote" placeholder="What was this expense for?"></div>
+              <div class="col-12"><label class="form-label small">Approved By</label>
+                <select class="form-select" id="expApprovedBy">
+                  ${approvers.map(u => `<option value="${u.id}">${APP.escapeHtml(u.fullName)} (${AUTH.roleLabel(u.role)})</option>`).join('')}
+                  <option value="0">Other (type below)</option>
+                </select>
+              </div>
+              <div class="col-12 d-none" id="expApproverOtherWrap"><input class="form-control" id="expApproverOther" placeholder="Approver's name"></div>
+            </div>
+            <button class="btn btn-brand w-100 mt-3" id="saveExpBtn"><i class="fas fa-circle-check me-1"></i><span id="saveExpBtnLabel">Save Expense</span></button>
+            <button class="btn btn-outline-secondary w-100 mt-2 d-none" id="cancelEditExpBtn">Cancel Edit</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-7">
+        <div class="row g-3 mb-3">
+          <div class="col-6 col-lg-4"><div class="kpi-card c3 h-100"><div class="kpi-label">Today's Expenses</div><div class="kpi-value" id="kpiToday">-</div></div></div>
+          <div class="col-6 col-lg-4"><div class="kpi-card c4 h-100"><div class="kpi-label">This Month</div><div class="kpi-value" id="kpiMonth">-</div></div></div>
+          <div class="col-12 col-lg-4"><div class="kpi-card c1 h-100"><div class="kpi-label">All Time</div><div class="kpi-value" id="kpiAll">-</div></div></div>
+        </div>
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span>Expense History</span>
+            <button class="btn btn-sm btn-outline-secondary" id="exportExpBtn"><i class="fas fa-download me-1"></i>Export CSV</button>
+          </div>
+          <div class="card-body p-0" style="max-height: 480px; overflow-y:auto;">
+            <table class="table table-sm mb-0">
+              <thead><tr><th>Date</th><th>Category</th><th>Note</th><th class="text-end">Amount</th><th>Approved By</th><th>Recorded By</th><th class="text-end">Actions</th></tr></thead>
+              <tbody id="expBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('expDate').value = new Date().toISOString().slice(0, 10);
+
+  document.getElementById('expApprovedBy').addEventListener('change', (e) => {
+    document.getElementById('expApproverOtherWrap').classList.toggle('d-none', e.target.value !== '0');
+  });
+
+  function approverName(exp) {
+    if (exp.approvedByName) return exp.approvedByName;
+    const u = users.find(x => x.id === exp.approvedById);
+    return u ? u.fullName : '—';
+  }
+
+  function render() {
+    const sorted = [...expenses].sort((a, b) => new Date(b.date) - new Date(a.date));
+    document.getElementById('expBody').innerHTML = sorted.length ? sorted.map(e => `
+      <tr>
+        <td class="small">${e.date}</td>
+        <td class="small">${APP.escapeHtml(e.category)}</td>
+        <td class="small">${APP.escapeHtml(e.note || '')}</td>
+        <td class="text-end fw-semibold">${APP.fmt(e.amount)}</td>
+        <td class="small">${APP.escapeHtml(approverName(e))}</td>
+        <td class="small text-muted">${APP.escapeHtml(e.recordedByName || '')}</td>
+        <td class="text-end">
+          <button class="btn btn-sm btn-outline-secondary editExpBtn" data-id="${e.id}"><i class="fas fa-pen"></i></button>
+          <button class="btn btn-sm btn-outline-danger delExpBtn" data-id="${e.id}"><i class="fas fa-trash"></i></button>
+        </td>
+      </tr>`).join('') : `<tr><td colspan="7" class="text-center text-muted py-4">No expenses recorded yet.</td></tr>`;
+
+    document.getElementById('expBody').querySelectorAll('.editExpBtn').forEach(b => b.addEventListener('click', () => openEdit(Number(b.dataset.id))));
+    document.getElementById('expBody').querySelectorAll('.delExpBtn').forEach(b => b.addEventListener('click', () => del(Number(b.dataset.id))));
+
+    const today = new Date().toISOString().slice(0, 10);
+    const thisMonth = today.slice(0, 7);
+    const todayTotal = expenses.filter(e => e.date === today).reduce((s, e) => s + e.amount, 0);
+    const monthTotal = expenses.filter(e => e.date.slice(0, 7) === thisMonth).reduce((s, e) => s + e.amount, 0);
+    const allTotal = expenses.reduce((s, e) => s + e.amount, 0);
+    document.getElementById('kpiToday').textContent = APP.fmt(todayTotal);
+    document.getElementById('kpiMonth').textContent = APP.fmt(monthTotal);
+    document.getElementById('kpiAll').textContent = APP.fmt(allTotal);
+  }
+
+  function resetForm() {
+    editingId = null;
+    document.getElementById('expFormTitle').textContent = 'Record Expense';
+    document.getElementById('saveExpBtnLabel').textContent = 'Save Expense';
+    document.getElementById('cancelEditExpBtn').classList.add('d-none');
+    document.getElementById('expDate').value = new Date().toISOString().slice(0, 10);
+    document.getElementById('expAmount').value = '';
+    document.getElementById('expCategory').value = CATEGORIES[0];
+    document.getElementById('expNote').value = '';
+    document.getElementById('expApprovedBy').value = approvers.length ? approvers[0].id : '0';
+    document.getElementById('expApproverOtherWrap').classList.add('d-none');
+    document.getElementById('expApproverOther').value = '';
+  }
+
+  function openEdit(id) {
+    const e = expenses.find(x => x.id === id);
+    if (!e) return;
+    editingId = id;
+    document.getElementById('expFormTitle').textContent = 'Edit Expense';
+    document.getElementById('saveExpBtnLabel').textContent = 'Update Expense';
+    document.getElementById('cancelEditExpBtn').classList.remove('d-none');
+    document.getElementById('expDate').value = e.date;
+    document.getElementById('expAmount').value = e.amount;
+    document.getElementById('expCategory').value = e.category;
+    document.getElementById('expNote').value = e.note || '';
+    if (e.approvedById) { document.getElementById('expApprovedBy').value = e.approvedById; document.getElementById('expApproverOtherWrap').classList.add('d-none'); }
+    else { document.getElementById('expApprovedBy').value = '0'; document.getElementById('expApproverOtherWrap').classList.remove('d-none'); document.getElementById('expApproverOther').value = e.approvedByName || ''; }
+  }
+
+  document.getElementById('cancelEditExpBtn').addEventListener('click', resetForm);
+
+  function del(id) {
+    if (!APP.confirmAction('Delete this expense record?')) return;
+    expenses = expenses.filter(e => e.id !== id);
+    DB.saveExpenses(expenses);
+    DB.logActivity(session.fullName, 'Delete Expense', `#${id}`);
+    render();
+    APP.toast('Expense deleted');
+  }
+
+  document.getElementById('saveExpBtn').addEventListener('click', () => {
+    const date = document.getElementById('expDate').value;
+    const amount = Number(document.getElementById('expAmount').value) || 0;
+    if (!date || amount <= 0) { APP.toast('Enter a valid date and amount', 'warning'); return; }
+    const category = document.getElementById('expCategory').value;
+    const note = document.getElementById('expNote').value.trim();
+    const approvedByVal = document.getElementById('expApprovedBy').value;
+    const approvedById = approvedByVal !== '0' ? Number(approvedByVal) : null;
+    const approvedByName = approvedByVal === '0' ? document.getElementById('expApproverOther').value.trim() : null;
+    if (!approvedById && !approvedByName) { APP.toast('Please specify who approved this expense', 'warning'); return; }
+
+    if (editingId) {
+      expenses = expenses.map(e => e.id === editingId ? { ...e, date, amount, category, note, approvedById, approvedByName } : e);
+      DB.logActivity(session.fullName, 'Edit Expense', `${category} — ${APP.fmt(amount)}`);
+      APP.toast('Expense updated');
+    } else {
+      expenses.push({
+        id: DB.nextId('expense'), date, amount, category, note, approvedById, approvedByName,
+        recordedById: session.userId, recordedByName: session.fullName, createdAt: new Date().toISOString()
+      });
+      DB.logActivity(session.fullName, 'Record Expense', `${category} — ${APP.fmt(amount)}`);
+      APP.toast('Expense recorded');
+    }
+    DB.saveExpenses(expenses);
+    resetForm();
+    render();
+  });
+
+  document.getElementById('exportExpBtn').addEventListener('click', () => {
+    const rows = [['Date', 'Category', 'Note', 'Amount', 'Approved By', 'Recorded By']];
+    [...expenses].sort((a, b) => new Date(a.date) - new Date(b.date)).forEach(e => {
+      rows.push([e.date, e.category, e.note || '', e.amount, approverName(e), e.recordedByName || '']);
+    });
+    const csv = rows.map(r => r.map(v => {
+      const s = String(v ?? '');
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }).join(',')).join('\r\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `expenses-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+  });
+
+  resetForm();
+  render();
+};
+
+
+PAGES.activitylog = async function (mount, session) {
+
+  const activity = DB.getActivity();
+
+  mount.innerHTML = `
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+      <input type="text" id="searchBox" class="form-control" style="max-width:320px" placeholder="Search by user or action...">
+      <button class="btn btn-outline-secondary" id="exportLogBtn"><i class="fas fa-download me-1"></i>Export CSV</button>
+    </div>
+    <div class="card">
+      <div class="card-header">Activity Log <span class="text-muted small">— every significant action across the system</span></div>
+      <div class="card-body p-0">
+        <div class="table-responsive" style="max-height: 620px; overflow-y:auto;">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Date &amp; Time</th><th>User</th><th>Action</th><th>Details</th></tr></thead>
+            <tbody id="logBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+
+  function render(term = '') {
+    const t = term.trim().toLowerCase();
+    const rows = activity.filter(a => !t || (a.userName || '').toLowerCase().includes(t) || (a.action || '').toLowerCase().includes(t) || (a.details || '').toLowerCase().includes(t));
+    document.getElementById('logBody').innerHTML = rows.length ? rows.map(a => `
+      <tr>
+        <td class="small text-muted">${APP.fmtDate(a.at)}</td>
+        <td class="small fw-semibold">${APP.escapeHtml(a.userName || '')}</td>
+        <td class="small"><span class="badge bg-light text-dark border">${APP.escapeHtml(a.action || '')}</span></td>
+        <td class="small">${APP.escapeHtml(a.details || '')}</td>
+      </tr>`).join('') : `<tr><td colspan="4" class="text-center text-muted py-4">No matching log entries.</td></tr>`;
+  }
+
+  document.getElementById('searchBox').addEventListener('input', (e) => render(e.target.value));
+
+  document.getElementById('exportLogBtn').addEventListener('click', () => {
+    const rows = [['Date & Time', 'User', 'Action', 'Details']];
+    [...activity].reverse().forEach(a => rows.push([APP.fmtDate(a.at), a.userName || '', a.action || '', a.details || '']));
+    const csv = rows.map(r => r.map(v => {
+      const s = String(v ?? '');
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }).join(',')).join('\r\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `activity-log-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+  });
+
+  render();
+};
+
 </script>
 <script>
 
@@ -4142,6 +4935,9 @@ PAGES.attendance = async function (mount, session) {
     var result = await AUTH.login(username, password);
 
     if (result.ok) {
+      if (!localStorage.getItem('pos_current_shift_id')) {
+        await SHIFT.promptOpening(AUTH.getSession());
+      }
       await APP.navigateTo('dashboard');
     } else {
       errBox.textContent = result.error;
@@ -4157,4 +4953,3 @@ PAGES.attendance = async function (mount, session) {
 </script>
 </body>
 </html>
-
