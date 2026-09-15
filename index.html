@@ -501,7 +501,7 @@ const DB = (() => {
    ========================================================= */
 
 const LICENSE = (() => {
-  const TRIAL_DAYS = 60;
+  const TRIAL_DAYS = 10;
   // SHA-256 of the registration key — the real key is never stored in plain text in this file.
   const KEY_HASH = 'f8873768a2c0ced968fc73ae1e82b6974d92149c7000b52420aff16b7dbf1968';
 
@@ -3233,60 +3233,55 @@ PAGES.reports = async function (mount, session) {
   const sales = DB.getSales();
   const products = DB.getProducts();
   const categories = DB.getCategories();
+  const users = DB.getUsers();
+  const suppliers = DB.getSuppliers();
+  const customers = DB.getCustomers();
+  const purchases = DB.getPurchases();
 
   mount.innerHTML = `
     <div class="card mb-3">
-      <div class="card-body d-flex flex-wrap gap-2 align-items-end">
-        <div>
-          <label class="form-label small">From</label>
-          <input type="date" class="form-control" id="fromDate">
-        </div>
-        <div>
-          <label class="form-label small">To</label>
-          <input type="date" class="form-control" id="toDate">
-        </div>
-        <button class="btn btn-brand" id="applyBtn"><i class="fas fa-filter me-1"></i>Apply</button>
-        <button class="btn btn-outline-secondary" id="resetBtn">Reset (All Time)</button>
-      </div>
-    </div>
-
-    <div class="row g-3 mb-3">
-      <div class="col-6 col-lg-3"><div class="kpi-card c1"><div class="kpi-label">Total Sales</div><div class="kpi-value" id="kpiTotal">-</div></div></div>
-      <div class="col-6 col-lg-3"><div class="kpi-card c2"><div class="kpi-label">Invoices</div><div class="kpi-value" id="kpiCount">-</div></div></div>
-      <div class="col-6 col-lg-3"><div class="kpi-card c3"><div class="kpi-label">Avg. Invoice</div><div class="kpi-value" id="kpiAvg">-</div></div></div>
-      <div class="col-6 col-lg-3"><div class="kpi-card c4"><div class="kpi-label">Items Sold</div><div class="kpi-value" id="kpiItems">-</div></div></div>
-    </div>
-
-    <div class="row g-3">
-      <div class="col-lg-7">
-        <div class="card">
-          <div class="card-header">Sales Trend</div>
-          <div class="card-body" id="trendChart"></div>
-        </div>
-      </div>
-      <div class="col-lg-5">
-        <div class="card">
-          <div class="card-header">Top 5 Products (by revenue)</div>
-          <div class="card-body p-0">
-            <table class="table table-sm mb-0">
-              <thead><tr><th>Product</th><th class="text-end">Qty</th><th class="text-end">Revenue</th></tr></thead>
-              <tbody id="topProductsBody"></tbody>
-            </table>
+      <div class="card-body">
+        <div class="row g-2 align-items-end">
+          <div class="col-6 col-md-2">
+            <label class="form-label small">From</label>
+            <input type="date" class="form-control" id="fromDate">
+          </div>
+          <div class="col-6 col-md-2">
+            <label class="form-label small">To</label>
+            <input type="date" class="form-control" id="toDate">
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small">Cashier</label>
+            <select class="form-select" id="cashierFilter">
+              <option value="">All Cashiers</option>
+              ${users.map(u => `<option value="${u.id}">${APP.escapeHtml(u.fullName)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small">Report Type</label>
+            <select class="form-select" id="reportType">
+              <option value="overview">Overview</option>
+              <option value="daywise">Day-wise Sales</option>
+              <option value="monthly">Monthly Sales</option>
+              <option value="cashier">Cashier-wise Sales</option>
+              <option value="supplier">Supplier-wise Report</option>
+              <option value="customer">Customer-wise Report</option>
+            </select>
+          </div>
+          <div class="col-6 col-md-2">
+            <button class="btn btn-brand w-100" id="applyBtn"><i class="fas fa-filter me-1"></i>Apply</button>
           </div>
         </div>
+        <div class="d-flex justify-content-end gap-2 mt-2">
+          <button class="btn btn-outline-secondary btn-sm" id="exportBtn"><i class="fas fa-download me-1"></i>Export CSV</button>
+          <button class="btn btn-outline-secondary btn-sm" id="resetBtn">Reset (All Time, All Cashiers)</button>
+        </div>
       </div>
     </div>
-
-    <div class="card mt-3">
-      <div class="card-header">Sales by Category</div>
-      <div class="card-body p-0">
-        <table class="table table-sm mb-0">
-          <thead><tr><th>Category</th><th class="text-end">Qty Sold</th><th class="text-end">Revenue</th></tr></thead>
-          <tbody id="catBody"></tbody>
-        </table>
-      </div>
-    </div>
+    <div id="reportBody"></div>
   `;
+
+  let lastCsvRows = null; // [[header...], [row...], ...] — refreshed by each render function
 
   function inRange(dateIso, from, to) {
     const d = new Date(dateIso);
@@ -3295,27 +3290,33 @@ PAGES.reports = async function (mount, session) {
     return true;
   }
 
-  function build(from, to) {
-    const filtered = sales.filter(s => inRange(s.date, from, to));
+  function getFilteredSales(from, to, cashierId) {
+    return sales.filter(s => inRange(s.date, from, to) && (!cashierId || s.userId === cashierId));
+  }
+
+  function exportCsv(filenamePrefix) {
+    if (!lastCsvRows || !lastCsvRows.length) { APP.toast('Nothing to export for this report', 'warning'); return; }
+    const csv = lastCsvRows.map(r => r.map(v => {
+      const s = String(v ?? '');
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }).join(',')).join('\r\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${filenamePrefix}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+  }
+
+  // ---------------- Overview ----------------
+  function renderOverview(filtered, body) {
     const total = filtered.reduce((s, x) => s + x.total, 0);
     const itemCount = filtered.reduce((s, x) => s + x.items.reduce((a, i) => a + i.qty, 0), 0);
 
-    document.getElementById('kpiTotal').textContent = APP.fmt(total);
-    document.getElementById('kpiCount').textContent = filtered.length;
-    document.getElementById('kpiAvg').textContent = APP.fmt(filtered.length ? total / filtered.length : 0);
-    document.getElementById('kpiItems').textContent = itemCount;
-
-    // trend by day
     const byDay = {};
-    filtered.forEach(s => {
-      const key = new Date(s.date).toISOString().slice(0, 10);
-      byDay[key] = (byDay[key] || 0) + s.total;
-    });
+    filtered.forEach(s => { const key = new Date(s.date).toISOString().slice(0, 10); byDay[key] = (byDay[key] || 0) + s.total; });
     const days = Object.keys(byDay).sort();
     const values = days.map(d => byDay[d]);
-    drawTrendChart(days, values);
 
-    // top products
     const prodMap = {};
     filtered.forEach(s => s.items.forEach(i => {
       if (!prodMap[i.productId]) prodMap[i.productId] = { name: i.name, qty: 0, revenue: 0 };
@@ -3323,11 +3324,7 @@ PAGES.reports = async function (mount, session) {
       prodMap[i.productId].revenue += i.total;
     }));
     const top = Object.values(prodMap).sort((a, b) => b.revenue - a.revenue).slice(0, 5);
-    document.getElementById('topProductsBody').innerHTML = top.length ? top.map(p => `
-      <tr><td>${APP.escapeHtml(p.name)}</td><td class="text-end">${p.qty}</td><td class="text-end">${APP.fmt(p.revenue)}</td></tr>
-    `).join('') : `<tr><td colspan="3" class="text-center text-muted py-3">No sales in this period.</td></tr>`;
 
-    // by category
     const catMap = {};
     filtered.forEach(s => s.items.forEach(i => {
       const prod = products.find(p => p.id === i.productId);
@@ -3338,59 +3335,219 @@ PAGES.reports = async function (mount, session) {
       catMap[catName].revenue += i.total;
     }));
     const catRows = Object.entries(catMap).sort((a, b) => b[1].revenue - a[1].revenue);
-    document.getElementById('catBody').innerHTML = catRows.length ? catRows.map(([name, v]) => `
-      <tr><td>${APP.escapeHtml(name)}</td><td class="text-end">${v.qty}</td><td class="text-end">${APP.fmt(v.revenue)}</td></tr>
-    `).join('') : `<tr><td colspan="3" class="text-center text-muted py-3">No sales in this period.</td></tr>`;
+
+    body.innerHTML = `
+      <div class="row g-3 mb-3">
+        <div class="col-6 col-lg-3"><div class="kpi-card c1"><div class="kpi-label">Total Sales</div><div class="kpi-value">${APP.fmt(total)}</div></div></div>
+        <div class="col-6 col-lg-3"><div class="kpi-card c2"><div class="kpi-label">Invoices</div><div class="kpi-value">${filtered.length}</div></div></div>
+        <div class="col-6 col-lg-3"><div class="kpi-card c3"><div class="kpi-label">Avg. Invoice</div><div class="kpi-value">${APP.fmt(filtered.length ? total / filtered.length : 0)}</div></div></div>
+        <div class="col-6 col-lg-3"><div class="kpi-card c4"><div class="kpi-label">Items Sold</div><div class="kpi-value">${itemCount}</div></div></div>
+      </div>
+      <div class="row g-3">
+        <div class="col-lg-7">
+          <div class="card">
+            <div class="card-header">Sales Trend</div>
+            <div class="card-body" id="trendChart"></div>
+          </div>
+        </div>
+        <div class="col-lg-5">
+          <div class="card">
+            <div class="card-header">Top 5 Products (by revenue)</div>
+            <div class="card-body p-0">
+              <table class="table table-sm mb-0">
+                <thead><tr><th>Product</th><th class="text-end">Qty</th><th class="text-end">Revenue</th></tr></thead>
+                <tbody>${top.length ? top.map(p => `<tr><td>${APP.escapeHtml(p.name)}</td><td class="text-end">${p.qty}</td><td class="text-end">${APP.fmt(p.revenue)}</td></tr>`).join('') : `<tr><td colspan="3" class="text-center text-muted py-3">No sales in this period.</td></tr>`}</tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card mt-3">
+        <div class="card-header">Sales by Category</div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Category</th><th class="text-end">Qty Sold</th><th class="text-end">Revenue</th></tr></thead>
+            <tbody>${catRows.length ? catRows.map(([name, v]) => `<tr><td>${APP.escapeHtml(name)}</td><td class="text-end">${v.qty}</td><td class="text-end">${APP.fmt(v.revenue)}</td></tr>`).join('') : `<tr><td colspan="3" class="text-center text-muted py-3">No sales in this period.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    drawTrendChart(days, values);
+
+    lastCsvRows = [['Metric', 'Value'], ['Total Sales', total], ['Invoices', filtered.length], ['Avg Invoice', filtered.length ? total / filtered.length : 0], ['Items Sold', itemCount]];
   }
 
-  // Lightweight dependency-free SVG line chart (keeps the app 100% offline).
   function drawTrendChart(labels, values) {
     const box = document.getElementById('trendChart');
+    if (!box) return;
     if (!labels.length) { box.innerHTML = '<div class="text-center text-muted py-5">No sales in this period.</div>'; return; }
     const w = 680, h = 220, padL = 46, padR = 12, padT = 12, padB = 28;
     const max = Math.max(...values, 1);
     const stepX = labels.length > 1 ? (w - padL - padR) / (labels.length - 1) : 0;
-    const points = values.map((v, i) => {
-      const x = padL + i * stepX;
-      const y = padT + (1 - v / max) * (h - padT - padB);
-      return [x, y];
-    });
+    const points = values.map((v, i) => { const x = padL + i * stepX; const y = padT + (1 - v / max) * (h - padT - padB); return [x, y]; });
     const linePath = points.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
     const areaPath = linePath + ` L${points[points.length - 1][0].toFixed(1)} ${h - padB} L${points[0][0].toFixed(1)} ${h - padB} Z`;
     const gridLines = [0, .25, .5, .75, 1].map(f => {
       const y = padT + f * (h - padT - padB);
       const val = Math.round(max * (1 - f));
-      return `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#eef0f8" stroke-width="1"/>
-              <text x="${padL - 6}" y="${y + 4}" font-size="9" fill="#8a8ea8" text-anchor="end">${val}</text>`;
+      return `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#eef0f8" stroke-width="1"/><text x="${padL - 6}" y="${y + 4}" font-size="9" fill="#8a8ea8" text-anchor="end">${val}</text>`;
     }).join('');
     const showEvery = Math.ceil(labels.length / 7) || 1;
     const xLabels = labels.map((l, i) => {
       if (i % showEvery !== 0 && i !== labels.length - 1) return '';
-      const short = l.slice(5); // MM-DD
-      return `<text x="${points[i][0].toFixed(1)}" y="${h - 8}" font-size="9" fill="#8a8ea8" text-anchor="middle">${short}</text>`;
+      return `<text x="${points[i][0].toFixed(1)}" y="${h - 8}" font-size="9" fill="#8a8ea8" text-anchor="middle">${l.slice(5)}</text>`;
     }).join('');
     const dots = points.map(p => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="#4f46e5"/>`).join('');
-
-    box.innerHTML = `
-      <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:220px" xmlns="http://www.w3.org/2000/svg">
-        ${gridLines}
-        <path d="${areaPath}" fill="rgba(79,70,229,.15)" stroke="none"/>
-        <path d="${linePath}" fill="none" stroke="#4f46e5" stroke-width="2"/>
-        ${dots}
-        ${xLabels}
-      </svg>`;
+    box.innerHTML = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:220px" xmlns="http://www.w3.org/2000/svg">${gridLines}<path d="${areaPath}" fill="rgba(79,70,229,.15)" stroke="none"/><path d="${linePath}" fill="none" stroke="#4f46e5" stroke-width="2"/>${dots}${xLabels}</svg>`;
   }
 
-  document.getElementById('applyBtn').addEventListener('click', () => {
-    build(document.getElementById('fromDate').value, document.getElementById('toDate').value);
-  });
+  // ---------------- Day-wise ----------------
+  function renderDayWise(filtered, body) {
+    const byDay = {};
+    filtered.forEach(s => {
+      const key = new Date(s.date).toISOString().slice(0, 10);
+      if (!byDay[key]) byDay[key] = { count: 0, total: 0 };
+      byDay[key].count++; byDay[key].total += s.total;
+    });
+    const rows = Object.entries(byDay).sort((a, b) => b[0].localeCompare(a[0]));
+    body.innerHTML = `
+      <div class="card">
+        <div class="card-header">Day-wise Sales</div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Date</th><th class="text-end">Invoices</th><th class="text-end">Total Sales</th></tr></thead>
+            <tbody>${rows.length ? rows.map(([d, v]) => `<tr><td>${d}</td><td class="text-end">${v.count}</td><td class="text-end fw-semibold">${APP.fmt(v.total)}</td></tr>`).join('') : `<tr><td colspan="3" class="text-center text-muted py-4">No sales in this period.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>`;
+    lastCsvRows = [['Date', 'Invoices', 'Total Sales'], ...rows.map(([d, v]) => [d, v.count, v.total])];
+  }
+
+  // ---------------- Monthly ----------------
+  function renderMonthly(filtered, body) {
+    const byMonth = {};
+    filtered.forEach(s => {
+      const key = new Date(s.date).toISOString().slice(0, 7);
+      if (!byMonth[key]) byMonth[key] = { count: 0, total: 0 };
+      byMonth[key].count++; byMonth[key].total += s.total;
+    });
+    const rows = Object.entries(byMonth).sort((a, b) => b[0].localeCompare(a[0]));
+    body.innerHTML = `
+      <div class="card">
+        <div class="card-header">Monthly Sales</div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Month</th><th class="text-end">Invoices</th><th class="text-end">Total Sales</th></tr></thead>
+            <tbody>${rows.length ? rows.map(([m, v]) => `<tr><td>${m}</td><td class="text-end">${v.count}</td><td class="text-end fw-semibold">${APP.fmt(v.total)}</td></tr>`).join('') : `<tr><td colspan="3" class="text-center text-muted py-4">No sales in this period.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>`;
+    lastCsvRows = [['Month', 'Invoices', 'Total Sales'], ...rows.map(([m, v]) => [m, v.count, v.total])];
+  }
+
+  // ---------------- Cashier-wise ----------------
+  function renderCashierWise(filtered, body) {
+    const byUser = {};
+    filtered.forEach(s => {
+      const key = s.userName || 'Unknown';
+      if (!byUser[key]) byUser[key] = { count: 0, total: 0 };
+      byUser[key].count++; byUser[key].total += s.total;
+    });
+    const rows = Object.entries(byUser).sort((a, b) => b[1].total - a[1].total);
+    body.innerHTML = `
+      <div class="card">
+        <div class="card-header">Cashier-wise Sales</div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Cashier</th><th class="text-end">Invoices</th><th class="text-end">Total Sales</th><th class="text-end">Avg. Invoice</th></tr></thead>
+            <tbody>${rows.length ? rows.map(([name, v]) => `<tr><td class="fw-semibold">${APP.escapeHtml(name)}</td><td class="text-end">${v.count}</td><td class="text-end fw-semibold">${APP.fmt(v.total)}</td><td class="text-end">${APP.fmt(v.count ? v.total / v.count : 0)}</td></tr>`).join('') : `<tr><td colspan="4" class="text-center text-muted py-4">No sales in this period.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>`;
+    lastCsvRows = [['Cashier', 'Invoices', 'Total Sales', 'Avg Invoice'], ...rows.map(([name, v]) => [name, v.count, v.total, v.count ? v.total / v.count : 0])];
+  }
+
+  // ---------------- Supplier-wise ----------------
+  function renderSupplierWise(from, to, body) {
+    const filteredPO = purchases.filter(p => inRange(p.date, from, to));
+    const bySup = {};
+    filteredPO.forEach(po => {
+      const key = po.supplierName || 'Unknown';
+      if (!bySup[key]) bySup[key] = { count: 0, total: 0, paid: 0 };
+      bySup[key].count++; bySup[key].total += po.total; bySup[key].paid += (po.paid != null ? po.paid : po.total);
+    });
+    const rows = Object.entries(bySup).sort((a, b) => b[1].total - a[1].total);
+    body.innerHTML = `
+      <div class="card">
+        <div class="card-header">Supplier-wise Report <span class="text-muted small">(purchases in selected date range; credit/wallet shown are current balances)</span></div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Supplier</th><th class="text-end">Purchases</th><th class="text-end">Total Purchased</th><th class="text-end">Paid</th><th class="text-end">Current Credit Owed</th><th class="text-end">Current Wallet</th></tr></thead>
+            <tbody>${rows.length ? rows.map(([name, v]) => {
+              const sup = suppliers.find(s => s.name === name);
+              return `<tr><td class="fw-semibold">${APP.escapeHtml(name)}</td><td class="text-end">${v.count}</td><td class="text-end">${APP.fmt(v.total)}</td><td class="text-end">${APP.fmt(v.paid)}</td><td class="text-end">${sup && sup.creditBalance ? `<span class="badge badge-stock-low">${APP.fmt(sup.creditBalance)}</span>` : '—'}</td><td class="text-end">${sup && sup.walletBalance ? `<span class="badge badge-stock-ok">${APP.fmt(sup.walletBalance)}</span>` : '—'}</td></tr>`;
+            }).join('') : `<tr><td colspan="6" class="text-center text-muted py-4">No purchases in this period.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>`;
+    lastCsvRows = [['Supplier', 'Purchases', 'Total Purchased', 'Paid', 'Current Credit Owed', 'Current Wallet'],
+      ...rows.map(([name, v]) => { const sup = suppliers.find(s => s.name === name); return [name, v.count, v.total, v.paid, sup ? (sup.creditBalance || 0) : 0, sup ? (sup.walletBalance || 0) : 0]; })];
+  }
+
+  // ---------------- Customer-wise ----------------
+  function renderCustomerWise(filtered, body) {
+    const byCust = {};
+    filtered.forEach(s => {
+      const key = s.customerName || 'Walk-in Customer';
+      if (!byCust[key]) byCust[key] = { count: 0, total: 0, customerId: s.customerId };
+      byCust[key].count++; byCust[key].total += s.total;
+    });
+    const rows = Object.entries(byCust).sort((a, b) => b[1].total - a[1].total);
+    body.innerHTML = `
+      <div class="card">
+        <div class="card-header">Customer-wise Report <span class="text-muted small">(sales in selected date range; wallet/credit shown are current balances)</span></div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Customer</th><th class="text-end">Orders</th><th class="text-end">Total Spent</th><th class="text-end">Current Wallet</th><th class="text-end">Current Credit Owed</th></tr></thead>
+            <tbody>${rows.length ? rows.map(([name, v]) => {
+              const cust = customers.find(c => c.id === v.customerId);
+              return `<tr><td class="fw-semibold">${APP.escapeHtml(name)}</td><td class="text-end">${v.count}</td><td class="text-end">${APP.fmt(v.total)}</td><td class="text-end">${cust && cust.walletBalance ? `<span class="badge badge-stock-ok">${APP.fmt(cust.walletBalance)}</span>` : '—'}</td><td class="text-end">${cust && cust.creditBalance ? `<span class="badge badge-stock-low">${APP.fmt(cust.creditBalance)}</span>` : '—'}</td></tr>`;
+            }).join('') : `<tr><td colspan="5" class="text-center text-muted py-4">No sales in this period.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>`;
+    lastCsvRows = [['Customer', 'Orders', 'Total Spent', 'Current Wallet', 'Current Credit Owed'],
+      ...rows.map(([name, v]) => { const cust = customers.find(c => c.id === v.customerId); return [name, v.count, v.total, cust ? (cust.walletBalance || 0) : 0, cust ? (cust.creditBalance || 0) : 0]; })];
+  }
+
+  function build() {
+    const from = document.getElementById('fromDate').value;
+    const to = document.getElementById('toDate').value;
+    const cashierId = document.getElementById('cashierFilter').value ? Number(document.getElementById('cashierFilter').value) : null;
+    const type = document.getElementById('reportType').value;
+    const filtered = getFilteredSales(from, to, cashierId);
+    const body = document.getElementById('reportBody');
+
+    if (type === 'overview') renderOverview(filtered, body);
+    else if (type === 'daywise') renderDayWise(filtered, body);
+    else if (type === 'monthly') renderMonthly(filtered, body);
+    else if (type === 'cashier') renderCashierWise(filtered, body);
+    else if (type === 'supplier') renderSupplierWise(from, to, body);
+    else if (type === 'customer') renderCustomerWise(filtered, body);
+  }
+
+  document.getElementById('applyBtn').addEventListener('click', build);
+  document.getElementById('reportType').addEventListener('change', build);
+  document.getElementById('exportBtn').addEventListener('click', () => exportCsv(document.getElementById('reportType').value + '-report'));
   document.getElementById('resetBtn').addEventListener('click', () => {
     document.getElementById('fromDate').value = '';
     document.getElementById('toDate').value = '';
-    build(null, null);
+    document.getElementById('cashierFilter').value = '';
+    document.getElementById('reportType').value = 'overview';
+    build();
   });
 
-  build(null, null);
+  build();
 };
 
 
@@ -3803,6 +3960,7 @@ PAGES.mobilebanking = async function (mount, session) {
   let accounts = DB.getMbAccounts();
   let txns = DB.getMbTransactions();
   let suppliers = DB.getSuppliers();
+  let customers = DB.getCustomers();
   let currentTxnPhoto = null;
 
   const TYPE_LABELS = {
@@ -3851,6 +4009,15 @@ PAGES.mobilebanking = async function (mount, session) {
               </div>
               <div class="small mt-1" id="txnSupInfoBox"></div>
             </div>
+
+            <div class="mb-2" id="custSectionWrap">
+              <label class="form-label small">Registered Customer (optional)</label>
+              <div class="input-group">
+                <select class="form-select" id="txnCustSelect"><option value="">— Walk-in / Not Registered —</option></select>
+                <button class="btn btn-outline-secondary" type="button" id="txnQuickAddCustBtn" title="Add new customer"><i class="fas fa-user-plus"></i></button>
+              </div>
+              <div class="small mt-1" id="txnCustInfoBox"></div>
+            </div>
             <div class="row g-2 mb-2">
               <div class="col-6"><label class="form-label small">Customer Name</label><input class="form-control" id="txnCustName"></div>
               <div class="col-6"><label class="form-label small">Customer Phone</label><input class="form-control" id="txnCustPhone"></div>
@@ -3864,7 +4031,28 @@ PAGES.mobilebanking = async function (mount, session) {
               <div class="col-6"><label class="form-label small">Amount</label><input type="number" min="0" class="form-control" id="txnAmount"></div>
               <div class="col-6"><label class="form-label small">Your Commission</label><input type="number" min="0" class="form-control" id="txnCommission" value="0"></div>
             </div>
-            <div class="mb-2">
+            <div class="d-flex justify-content-between small fw-semibold border-top pt-1"><span>Total Due From Customer</span><span id="txnTotalDue">${APP.fmt(0)}</span></div>
+
+            <div class="form-check mt-2 d-none" id="txnUseWalletWrap">
+              <input class="form-check-input" type="checkbox" id="txnUseWalletChk" checked>
+              <label class="form-check-label small" for="txnUseWalletChk" id="txnWalletLabel">Use customer wallet balance</label>
+            </div>
+            <div class="d-flex justify-content-between small text-success d-none" id="txnWalletAppliedRow"><span>Wallet Applied</span><span id="txnSumWalletApplied">${APP.fmt(0)}</span></div>
+
+            <div class="mb-2 mt-2">
+              <label class="form-label small">Amount Customer Gave</label>
+              <input type="number" min="0" class="form-control" id="txnCustGiven" placeholder="0">
+            </div>
+            <div class="d-flex justify-content-between small mt-1">
+              <span>Change to Return</span><strong id="txnChangeDue">${APP.fmt(0)}</strong>
+            </div>
+            <div class="form-check mt-1 d-none" id="txnAddToWalletWrap">
+              <input class="form-check-input" type="checkbox" id="txnAddToWalletChk">
+              <label class="form-check-label small" for="txnAddToWalletChk">Add this extra amount to customer's wallet instead of returning change</label>
+            </div>
+            <div class="alert alert-warning py-2 small mt-2 d-none" id="txnCreditWarningBox"></div>
+
+            <div class="mb-2 mt-2">
               <label class="form-label small">Payment Mode</label>
               <select class="form-select" id="txnPaymentMode">
                 <option value="cash">Cash</option>
@@ -3937,6 +4125,19 @@ PAGES.mobilebanking = async function (mount, session) {
         </div>
       </div>
     </div>
+
+    <div class="modal fade" id="txnQuickCustModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header"><h6 class="modal-title">Add Customer</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body">
+            <div class="mb-2"><label class="form-label small">Name</label><input class="form-control" id="txnNewCustName"></div>
+            <div class="mb-2"><label class="form-label small">Phone</label><input class="form-control" id="txnNewCustPhone"></div>
+          </div>
+          <div class="modal-footer"><button class="btn btn-brand" id="txnSaveNewCustBtn">Save Customer</button></div>
+        </div>
+      </div>
+    </div>
   `;
 
   function balanceOf(acctId) {
@@ -3970,12 +4171,14 @@ PAGES.mobilebanking = async function (mount, session) {
     const type = document.getElementById('txnType').value;
     const wrap = document.getElementById('billerField');
     const supWrap = document.getElementById('supplierField');
+    const custWrap = document.getElementById('custSectionWrap');
     const label = document.getElementById('billerLabel');
     const input = document.getElementById('txnBiller');
-    if (type === 'bill') { wrap.classList.remove('d-none'); supWrap.classList.add('d-none'); label.textContent = 'Biller / Company Name'; input.placeholder = 'e.g. K-Electric, SSGC, PTCL'; }
-    else if (type === 'send') { wrap.classList.remove('d-none'); supWrap.classList.add('d-none'); label.textContent = 'Receiver Number'; input.placeholder = 'e.g. 0300-XXXXXXX'; }
-    else if (type === 'supplier_payment') { wrap.classList.add('d-none'); supWrap.classList.remove('d-none'); updateTxnSupInfo(); }
-    else { wrap.classList.add('d-none'); supWrap.classList.add('d-none'); }
+    if (type === 'bill') { wrap.classList.remove('d-none'); supWrap.classList.add('d-none'); custWrap.classList.remove('d-none'); label.textContent = 'Biller / Company Name'; input.placeholder = 'e.g. K-Electric, SSGC, PTCL'; }
+    else if (type === 'send') { wrap.classList.remove('d-none'); supWrap.classList.add('d-none'); custWrap.classList.remove('d-none'); label.textContent = 'Receiver Number'; input.placeholder = 'e.g. 0300-XXXXXXX'; }
+    else if (type === 'supplier_payment') { wrap.classList.add('d-none'); supWrap.classList.remove('d-none'); custWrap.classList.add('d-none'); updateTxnSupInfo(); }
+    else { wrap.classList.add('d-none'); supWrap.classList.add('d-none'); custWrap.classList.add('d-none'); }
+    recalcTxn();
   }
   document.getElementById('txnType').addEventListener('change', updateBillerFieldLabel);
 
@@ -4008,6 +4211,111 @@ PAGES.mobilebanking = async function (mount, session) {
     bootstrap.Modal.getInstance(document.getElementById('txnQuickSupModal')).hide();
     APP.toast('Supplier added');
   });
+
+  // ---- registered customer + wallet/credit ----
+  function fillTxnCustSelect() {
+    document.getElementById('txnCustSelect').innerHTML = '<option value="">— Walk-in / Not Registered —</option>' +
+      customers.filter(c => c.id !== 1).map(c => `<option value="${c.id}">${APP.escapeHtml(c.name)}${c.phone ? ' - ' + c.phone : ''}</option>`).join('');
+  }
+  function getSelectedTxnCustomer() {
+    const id = Number(document.getElementById('txnCustSelect').value);
+    return customers.find(c => c.id === id) || null;
+  }
+  function updateTxnCustInfo() {
+    const cust = getSelectedTxnCustomer();
+    const box = document.getElementById('txnCustInfoBox');
+    const walletWrap = document.getElementById('txnUseWalletWrap');
+    if (cust) {
+      document.getElementById('txnCustName').value = cust.name;
+      document.getElementById('txnCustPhone').value = cust.phone || '';
+    }
+    if (!cust) {
+      box.innerHTML = '';
+      walletWrap.classList.add('d-none');
+      document.getElementById('txnUseWalletChk').checked = false;
+      recalcTxn();
+      return;
+    }
+    const wallet = cust.walletBalance || 0;
+    const credit = cust.creditBalance || 0;
+    let html = '';
+    if (wallet > 0) html += `<span class="badge badge-stock-ok me-1"><i class="fas fa-wallet"></i> Wallet: ${APP.fmt(wallet)}</span>`;
+    if (credit > 0) html += `<span class="badge badge-stock-low"><i class="fas fa-triangle-exclamation"></i> Owes: ${APP.fmt(credit)}</span>`;
+    box.innerHTML = html;
+    if (wallet > 0) {
+      walletWrap.classList.remove('d-none');
+      document.getElementById('txnUseWalletChk').checked = true;
+      document.getElementById('txnWalletLabel').textContent = `Use wallet balance (${APP.fmt(wallet)} available)`;
+    } else {
+      walletWrap.classList.add('d-none');
+      document.getElementById('txnUseWalletChk').checked = false;
+    }
+    recalcTxn();
+  }
+  document.getElementById('txnCustSelect').addEventListener('change', updateTxnCustInfo);
+  document.getElementById('txnQuickAddCustBtn').addEventListener('click', () => {
+    document.getElementById('txnNewCustName').value = '';
+    document.getElementById('txnNewCustPhone').value = '';
+    new bootstrap.Modal(document.getElementById('txnQuickCustModal')).show();
+  });
+  document.getElementById('txnSaveNewCustBtn').addEventListener('click', () => {
+    const name = document.getElementById('txnNewCustName').value.trim();
+    if (!name) { APP.toast('Customer name is required', 'warning'); return; }
+    const newCust = { id: DB.nextId('customer'), name, phone: document.getElementById('txnNewCustPhone').value.trim(), address: '', createdAt: new Date().toISOString(), creditBalance: 0, walletBalance: 0 };
+    customers.push(newCust);
+    DB.saveCustomers(customers);
+    fillTxnCustSelect();
+    document.getElementById('txnCustSelect').value = newCust.id;
+    updateTxnCustInfo();
+    bootstrap.Modal.getInstance(document.getElementById('txnQuickCustModal')).hide();
+    APP.toast('Customer added');
+  });
+
+  function recalcTxn() {
+    const amount = Number(document.getElementById('txnAmount').value) || 0;
+    const commission = Number(document.getElementById('txnCommission').value) || 0;
+    const totalDue = amount + commission;
+    document.getElementById('txnTotalDue').textContent = APP.fmt(totalDue);
+
+    const cust = getSelectedTxnCustomer();
+    const useWallet = document.getElementById('txnUseWalletChk').checked && cust;
+    const walletApplied = useWallet ? Math.min(cust.walletBalance || 0, totalDue) : 0;
+    const walletRow = document.getElementById('txnWalletAppliedRow');
+    if (walletApplied > 0) { walletRow.classList.remove('d-none'); document.getElementById('txnSumWalletApplied').textContent = '- ' + APP.fmt(walletApplied); }
+    else walletRow.classList.add('d-none');
+
+    const given = Number(document.getElementById('txnCustGiven').value) || 0;
+    const effectivePaid = given + walletApplied;
+    const diff = effectivePaid - totalDue;
+
+    const addToWalletWrap = document.getElementById('txnAddToWalletWrap');
+    const creditBox = document.getElementById('txnCreditWarningBox');
+
+    if (diff > 0) {
+      document.getElementById('txnChangeDue').textContent = APP.fmt(diff);
+      if (cust) addToWalletWrap.classList.remove('d-none'); else { addToWalletWrap.classList.add('d-none'); document.getElementById('txnAddToWalletChk').checked = false; }
+      creditBox.classList.add('d-none');
+    } else if (diff < 0) {
+      document.getElementById('txnChangeDue').textContent = APP.fmt(0);
+      addToWalletWrap.classList.add('d-none');
+      document.getElementById('txnAddToWalletChk').checked = false;
+      creditBox.classList.remove('d-none');
+      creditBox.innerHTML = cust
+        ? `<i class="fas fa-triangle-exclamation me-1"></i>Rs ${Math.abs(diff).toLocaleString()} short — this will be added as <strong>credit</strong> for ${APP.escapeHtml(cust.name)}.`
+        : `<i class="fas fa-triangle-exclamation me-1"></i>Amount given is less than the total due. Select a registered customer to track this as credit.`;
+    } else {
+      document.getElementById('txnChangeDue').textContent = APP.fmt(0);
+      addToWalletWrap.classList.add('d-none');
+      document.getElementById('txnAddToWalletChk').checked = false;
+      creditBox.classList.add('d-none');
+    }
+
+    return { amount, commission, totalDue, walletApplied, given, effectivePaid, diff };
+  }
+  document.getElementById('txnAmount').addEventListener('input', recalcTxn);
+  document.getElementById('txnCommission').addEventListener('input', recalcTxn);
+  document.getElementById('txnCustGiven').addEventListener('input', recalcTxn);
+  document.getElementById('txnUseWalletChk').addEventListener('change', recalcTxn);
 
   function setTxnPhoto(dataUrl) {
     currentTxnPhoto = dataUrl || null;
@@ -4067,9 +4375,15 @@ PAGES.mobilebanking = async function (mount, session) {
         ${t.custName ? `<div>Customer: ${APP.escapeHtml(t.custName)}${t.custPhone ? ' (' + APP.escapeHtml(t.custPhone) + ')' : ''}</div>` : ''}
         ${t.note ? `<div>Note: ${APP.escapeHtml(t.note)}</div>` : ''}
         <hr>
-        <div class="d-flex justify-content-between fw-bold"><span>Amount</span><span>${APP.fmt(t.amount)}</span></div>
+        <div class="d-flex justify-content-between"><span>Amount</span><span>${APP.fmt(t.amount)}</span></div>
+        ${t.commission ? `<div class="d-flex justify-content-between"><span>Commission</span><span>+${APP.fmt(t.commission)}</span></div>` : ''}
+        <div class="d-flex justify-content-between fw-bold"><span>Total Due</span><span>${APP.fmt((t.amount || 0) + (t.commission || 0))}</span></div>
+        ${t.walletApplied ? `<div class="d-flex justify-content-between"><span>Wallet Applied</span><span>-${APP.fmt(t.walletApplied)}</span></div>` : ''}
+        <div class="d-flex justify-content-between"><span>Customer Gave</span><span>${APP.fmt(t.customerGiven || 0)}</span></div>
+        <div class="d-flex justify-content-between"><span>Change Returned</span><span>${APP.fmt(t.changeReturned || 0)}</span></div>
+        ${t.addedToWallet ? `<div class="d-flex justify-content-between text-success"><span>Added to Wallet</span><span>${APP.fmt(t.addedToWallet)}</span></div>` : ''}
+        ${t.creditAdded ? `<div class="d-flex justify-content-between text-danger"><span>Added as Credit</span><span>${APP.fmt(t.creditAdded)}</span></div>` : ''}
         <div>Payment Mode: ${t.paymentMode === 'credit' ? 'Credit (not yet settled)' : 'Cash'}</div>
-        ${t.commission ? `<div class="d-flex justify-content-between"><span>Your Commission</span><span>+${APP.fmt(t.commission)}</span></div>` : ''}
         <hr>
         <div class="text-center small">${APP.escapeHtml(settings.receiptFooter || '')}</div>
         <hr>
@@ -4082,11 +4396,10 @@ PAGES.mobilebanking = async function (mount, session) {
     if (!accounts.length) { APP.toast('Add a mobile account first', 'warning'); return; }
     const type = document.getElementById('txnType').value;
     const accountId = Number(document.getElementById('txnAccount').value);
-    const amount = Number(document.getElementById('txnAmount').value) || 0;
-    if (amount <= 0) { APP.toast('Enter a valid amount', 'warning'); return; }
-    const commission = Number(document.getElementById('txnCommission').value) || 0;
+    const totals = recalcTxn();
+    if (totals.amount <= 0) { APP.toast('Enter a valid amount', 'warning'); return; }
 
-    if ((type === 'bill' || type === 'send' || type === 'cashout' || type === 'supplier_payment') && balanceOf(accountId) < amount) {
+    if ((type === 'bill' || type === 'send' || type === 'cashout' || type === 'supplier_payment') && balanceOf(accountId) < totals.amount) {
       if (!APP.confirmAction('This account balance looks lower than the transaction amount. Continue anyway?')) return;
     }
 
@@ -4096,6 +4409,33 @@ PAGES.mobilebanking = async function (mount, session) {
       if (!supplierId) { APP.toast('Select a supplier', 'warning'); return; }
     }
 
+    const cust = (type === 'bill' || type === 'send') ? getSelectedTxnCustomer() : null;
+    if (totals.diff < 0 && (type === 'bill' || type === 'send')) {
+      if (!cust) {
+        if (!APP.confirmAction('Amount given is less than the total due and no registered customer is selected, so this shortfall will not be tracked. Continue anyway?')) return;
+      } else {
+        if (!APP.confirmAction(`Rs ${Math.abs(totals.diff).toLocaleString()} will be added as credit for ${cust.name}. Continue?`)) return;
+      }
+    }
+
+    const addToWallet = cust && totals.diff > 0 && document.getElementById('txnAddToWalletChk').checked;
+    const creditAdded = totals.diff < 0 && cust ? Math.abs(totals.diff) : 0;
+    const addedToWallet = addToWallet ? totals.diff : 0;
+    const changeReturned = (!addToWallet && totals.diff > 0) ? totals.diff : 0;
+
+    if (cust) {
+      customers = customers.map(c => {
+        if (c.id !== cust.id) return c;
+        let wallet = c.walletBalance || 0;
+        let credit = c.creditBalance || 0;
+        if (totals.walletApplied > 0) wallet -= totals.walletApplied;
+        if (addedToWallet > 0) wallet += addedToWallet;
+        if (creditAdded > 0) credit += creditAdded;
+        return { ...c, walletBalance: Math.max(wallet, 0), creditBalance: Math.max(credit, 0) };
+      });
+      DB.saveCustomers(customers);
+    }
+
     const txn = {
       id: DB.nextId('mbTxn'),
       date: new Date().toISOString(),
@@ -4103,11 +4443,17 @@ PAGES.mobilebanking = async function (mount, session) {
       accountId,
       biller: document.getElementById('txnBiller').value.trim(),
       supplierId,
+      customerId: cust ? cust.id : null,
       custName: document.getElementById('txnCustName').value.trim(),
       custPhone: document.getElementById('txnCustPhone').value.trim(),
       custPhoto: currentTxnPhoto || null,
-      amount,
-      commission,
+      amount: totals.amount,
+      commission: totals.commission,
+      walletApplied: totals.walletApplied,
+      customerGiven: totals.given,
+      changeReturned,
+      creditAdded,
+      addedToWallet,
       paymentMode: document.getElementById('txnPaymentMode').value,
       note: document.getElementById('txnNote').value.trim(),
       userId: session.userId,
@@ -4117,22 +4463,27 @@ PAGES.mobilebanking = async function (mount, session) {
     DB.saveMbTransactions(txns);
     const acctForLog = accounts.find(a => a.id === accountId);
     const acctLabel = acctForLog ? `${acctForLog.provider} - ${acctForLog.label}` : '';
-    DB.logActivity(session.fullName, 'Mobile Banking Txn', `${TYPE_LABELS[type]} — ${APP.fmt(amount)}${acctLabel ? ' — ' + acctLabel : ''}`);
+    DB.logActivity(session.fullName, 'Mobile Banking Txn', `${TYPE_LABELS[type]} — ${APP.fmt(totals.amount)}${acctLabel ? ' — ' + acctLabel : ''}`);
 
     if (type === 'supplier_payment' && supplierId) {
-      suppliers = suppliers.map(s => s.id === supplierId ? { ...s, creditBalance: Math.max((s.creditBalance || 0) - amount, 0) } : s);
+      suppliers = suppliers.map(s => s.id === supplierId ? { ...s, creditBalance: Math.max((s.creditBalance || 0) - totals.amount, 0) } : s);
       DB.saveSuppliers(suppliers);
       updateTxnSupInfo();
     }
 
-    ['txnBiller', 'txnCustName', 'txnCustPhone', 'txnAmount', 'txnNote'].forEach(id => document.getElementById(id).value = '');
-    document.getElementById('txnCommission').value = 0;
-    document.getElementById('txnPaymentMode').value = 'cash';
-    setTxnPhoto(null);
-
     renderAccountCards();
     renderTxnHistory();
+    showTxnReceipt(txn.id);
     APP.toast('Transaction recorded');
+
+    ['txnBiller', 'txnCustName', 'txnCustPhone', 'txnAmount', 'txnCustGiven', 'txnNote'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('txnCommission').value = 0;
+    document.getElementById('txnPaymentMode').value = 'cash';
+    document.getElementById('txnCustSelect').value = '';
+    document.getElementById('txnAddToWalletChk').checked = false;
+    setTxnPhoto(null);
+    updateTxnCustInfo();
+    recalcTxn();
   });
 
   // ---- account management (admin/manager) ----
@@ -4175,6 +4526,7 @@ PAGES.mobilebanking = async function (mount, session) {
 
   fillAccountSelect();
   fillTxnSupplierSelect();
+  fillTxnCustSelect();
   updateBillerFieldLabel();
   renderAccountCards();
   renderTxnHistory();
