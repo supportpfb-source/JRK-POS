@@ -488,173 +488,6 @@ const DB = (() => {
 </script>
 <script>
 /* =========================================================
-   Mobile POS — Trial & Registration License Gate
-   - 10-day free trial starting from first run.
-   - After the trial ends, the app is fully locked behind a
-     registration screen until the correct license key is
-     entered (into a password-type field, as requested).
-   - When packaged with Electron (desktop .exe), install date
-     and activation are stored in a file under the OS "app
-     data" folder (survives clearing browser storage). When
-     opened as plain HTML in a normal browser, it falls back
-     to localStorage so the app is still fully testable.
-   ========================================================= */
-
-const LICENSE = (() => {
-  const TRIAL_DAYS = 60;
-  // SHA-256 of the registration key — the real key is never stored in plain text in this file.
-  const KEY_HASH = 'f8873768a2c0ced968fc73ae1e82b6974d92149c7000b52420aff16b7dbf1968';
-
-  const LS_INSTALL = 'pos_install_date';
-  const LS_LICENSED = 'pos_licensed';
-
-  const inElectron = () => typeof window !== 'undefined' && !!window.electronAPI;
-
-  async function sha256(text) {
-    const enc = new TextEncoder().encode(text);
-    const buf = await crypto.subtle.digest('SHA-256', enc);
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-
-  // ---- status (sync, browser/localStorage mode) ----
-  function ensureInstallDate() {
-    let d = localStorage.getItem(LS_INSTALL);
-    if (!d) { d = new Date().toISOString(); localStorage.setItem(LS_INSTALL, d); }
-    return d;
-  }
-
-  function daysSinceInstall() {
-    const installed = new Date(ensureInstallDate());
-    const now = new Date();
-    return Math.floor((now - installed) / (1000 * 60 * 60 * 24));
-  }
-
-  // Returns { ok, licensed, trialDaysLeft } — synchronous best-effort for localStorage mode.
-  function statusLocal() {
-    const licensed = localStorage.getItem(LS_LICENSED) === 'true';
-    const days = daysSinceInstall();
-    const trialDaysLeft = Math.max(TRIAL_DAYS - days, 0);
-    return { ok: licensed || days < TRIAL_DAYS, licensed, trialDaysLeft, days };
-  }
-
-  // Async status — uses Electron's app-data-backed license file when available.
-  async function status() {
-    if (inElectron()) {
-      try {
-        const s = await window.electronAPI.getLicenseStatus();
-        return { ok: s.licensed || s.trialDaysLeft > 0, licensed: s.licensed, trialDaysLeft: s.trialDaysLeft, days: TRIAL_DAYS - s.trialDaysLeft };
-      } catch (e) { /* fall through to local */ }
-    }
-    return statusLocal();
-  }
-
-  async function activate(key) {
-    const hash = await sha256(key.trim());
-    const valid = hash === KEY_HASH;
-    if (!valid) return { ok: false, error: 'Invalid registration key. Please check and try again.' };
-    if (inElectron()) {
-      try {
-        await window.electronAPI.activateLicense(key.trim());
-      } catch (e) { /* ignore, still set local flag below */ }
-    }
-    localStorage.setItem(LS_LICENSED, 'true');
-    return { ok: true };
-  }
-
-  function gateStyles() {
-    if (document.getElementById('licenseGateStyles')) return;
-    const style = document.createElement('style');
-    style.id = 'licenseGateStyles';
-    style.textContent = `
-      #licenseGateRoot { position: fixed; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center;
-        background: radial-gradient(circle at top left, #4f46e5 0%, #1e1b3a 55%, #0f0d24 100%); padding: 1rem; }
-      #licenseGateRoot .lg-card { width: 100%; max-width: 440px; background: #fff; border-radius: 18px;
-        box-shadow: 0 20px 60px rgba(15,13,36,.35); padding: 2rem; font-family: "Segoe UI", Roboto, Arial, sans-serif; }
-      #licenseGateRoot .lg-badge { width: 56px; height: 56px; border-radius: 16px; background: linear-gradient(135deg,#4f46e5,#3730a3);
-        display:flex; align-items:center; justify-content:center; color:#fff; font-size:1.5rem; margin: 0 auto .75rem; }
-    `;
-    document.head.appendChild(style);
-  }
-
-  async function renderGate() {
-    gateStyles();
-    let root = document.getElementById('licenseGateRoot');
-    if (!root) { root = document.createElement('div'); root.id = 'licenseGateRoot'; document.body.appendChild(root); }
-    root.innerHTML = `
-      <div class="lg-card text-center">
-        <div class="lg-badge"><i class="fas fa-lock"></i></div>
-        <h5 class="fw-bold mb-1">Registration Required</h5>
-        <p class="text-muted small mb-3">Your ${TRIAL_DAYS}-day free trial of <strong>Mobile POS</strong> has ended.
-          Please enter your registration key to keep using the software.</p>
-        <form id="licenseForm" class="text-start">
-          <label class="form-label small fw-semibold">Registration Key</label>
-          <div class="input-group mb-2">
-            <input type="password" class="form-control" id="licenseKeyInput" placeholder="Enter registration key" autocomplete="off" required>
-            <button class="btn btn-outline-secondary" type="button" id="licenseToggle"><i class="fas fa-eye"></i></button>
-          </div>
-          <div id="licenseError" class="alert alert-danger py-2 small d-none"></div>
-          <button type="submit" class="btn btn-brand w-100 py-2 fw-semibold" id="licenseSubmitBtn">
-            <i class="fas fa-circle-check me-1"></i> Activate
-          </button>
-        </form>
-        <div class="text-muted mt-3" style="font-size:.72rem;">
-          Need a registration key? Contact the developer —<br>
-          Muhammad Asim Raza · 0304-1291775 · asimraza.aptechiic@gmail.com
-        </div>
-      </div>`;
-
-    document.getElementById('licenseToggle').addEventListener('click', () => {
-      const inp = document.getElementById('licenseKeyInput');
-      const icon = document.querySelector('#licenseToggle i');
-      if (inp.type === 'password') { inp.type = 'text'; icon.className = 'fas fa-eye-slash'; }
-      else { inp.type = 'password'; icon.className = 'fas fa-eye'; }
-    });
-
-    document.getElementById('licenseForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const btn = document.getElementById('licenseSubmitBtn');
-      const errBox = document.getElementById('licenseError');
-      errBox.classList.add('d-none');
-      btn.disabled = true;
-      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Verifying...';
-      const key = document.getElementById('licenseKeyInput').value;
-      const result = await activate(key);
-      if (result.ok) {
-        window.location.reload();
-      } else {
-        errBox.textContent = result.error;
-        errBox.classList.remove('d-none');
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-circle-check me-1"></i> Activate';
-      }
-    });
-  }
-
-  function renderTrialBanner(daysLeft) {
-    if (document.getElementById('trialBanner')) return;
-    const bar = document.createElement('div');
-    bar.id = 'trialBanner';
-    bar.className = 'text-center small py-1';
-    bar.style.cssText = 'background:#fff7ed;color:#9a3412;border-bottom:1px solid #fed7aa;';
-    bar.innerHTML = `<i class="fas fa-triangle-exclamation me-1"></i>Free trial — <strong>${daysLeft}</strong> day${daysLeft === 1 ? '' : 's'} remaining. Contact Muhammad Asim Raza (0304-1291775) for a registration key.`;
-    document.body.insertBefore(bar, document.body.firstChild);
-  }
-
-  // Main entry point every page calls before doing anything else.
-  // Returns true if the page may proceed, false if it must stop (gate is shown).
-  async function guardPage() {
-    const s = await status();
-    if (!s.ok) { await renderGate(); return false; }
-    if (!s.licensed && s.trialDaysLeft <= 3) renderTrialBanner(s.trialDaysLeft);
-    return true;
-  }
-
-  return { guardPage, status, activate, TRIAL_DAYS };
-})();
-
-</script>
-<script>
-/* =========================================================
    Mobile Accessories POS — Auth & Role Permissions
    ========================================================= */
 
@@ -944,8 +777,6 @@ const APP = (() => {
   }
 
   async function navigateTo(page) {
-    const licensedOk = await LICENSE.guardPage();
-    if (!licensedOk) return;
     const session = AUTH.guard(page);
     if (!session) return;
     showApp(session);
@@ -1023,8 +854,6 @@ const APP = (() => {
 
   async function boot() {
     await DB.seedIfEmpty();
-    const licensedOk = await LICENSE.guardPage();
-    if (!licensedOk) return;
     const session = AUTH.getSession();
     if (session) {
       await navigateTo('dashboard');
@@ -1208,8 +1037,19 @@ const SHIFT = (() => {
     const acct = DB.getMbAccounts().find(a => a.id === acctId);
     if (!acct) return 0;
     let bal = acct.openingBalance || 0;
-    DB.getMbTransactions().filter(t => t.accountId === acctId).forEach(t => {
-      if (t.type === 'cashin' || t.type === 'sale') bal += t.amount;
+    DB.getMbTransactions().forEach(t => {
+      if (t.type === 'transfer') {
+        if (t.fromAccountId === acctId) bal -= t.amount;
+        if (t.toAccountId === acctId) bal += t.amount;
+        return;
+      }
+      if (t.accountId !== acctId) return;
+      // Kept in sync with mobile-banking.js's balanceOf(): a pending "Pay
+      // Later" bill hasn't actually been paid yet, so it doesn't count;
+      // cashout/sale bring money INTO the account; bill/send/cashin/
+      // supplier_payment take it out.
+      if (t.type === 'bill' && t.billStatus === 'pending') return;
+      if (t.type === 'cashout' || t.type === 'sale') bal += t.amount;
       else bal -= t.amount;
     });
     return bal;
@@ -3877,10 +3717,6 @@ PAGES.settings = async function (mount, session) {
             </label>
           </div>
         </div>
-        <div class="card mb-3" id="licenseCard">
-          <div class="card-header">License Status</div>
-          <div class="card-body small" id="licenseStatusBody">Checking...</div>
-        </div>
         <div class="card border-danger">
           <div class="card-header text-danger">Danger Zone</div>
           <div class="card-body">
@@ -3891,17 +3727,6 @@ PAGES.settings = async function (mount, session) {
       </div>
     </div>
   `;
-
-  (async function loadLicenseStatus() {
-    const s = await LICENSE.status();
-    const box = document.getElementById('licenseStatusBody');
-    if (s.licensed) {
-      box.innerHTML = `<span class="badge badge-stock-ok mb-1">Registered</span><div class="text-muted">This installation is fully registered — no trial limits apply.</div>`;
-    } else {
-      box.innerHTML = `<span class="badge badge-stock-low mb-1">Trial — ${s.trialDaysLeft} day${s.trialDaysLeft === 1 ? '' : 's'} left</span>
-        <div class="text-muted">After the trial ends you'll be asked for a registration key. Contact Muhammad Asim Raza (0304-1291775) to register.</div>`;
-    }
-  })();
 
   document.getElementById('saveBtn').addEventListener('click', () => {
     const updated = {
@@ -3962,12 +3787,14 @@ PAGES.mobilebanking = async function (mount, session) {
   let suppliers = DB.getSuppliers();
   let customers = DB.getCustomers();
   let currentTxnPhoto = null;
+  let editingTxnId = null;
 
   const TYPE_LABELS = {
     bill: 'Utility Bill Payment',
     send: 'Send Money / Mobile Load',
-    cashin: 'Cash In (Load Account)',
-    cashout: 'Cash Out (Withdraw)',
+    cashin: 'Cash In (Customer Deposits)',
+    cashout: 'Cash Out (Customer Withdraws)',
+    transfer: 'Transfer Between Own Accounts',
     sale: 'POS Sale Payment Received',
     supplier_payment: 'Pay Supplier'
   };
@@ -3979,7 +3806,7 @@ PAGES.mobilebanking = async function (mount, session) {
       <div class="col-lg-5">
         <div class="card mb-3">
           <div class="card-header d-flex justify-content-between align-items-center">
-            <span><i class="fas fa-money-bill-transfer me-1"></i>New Transaction</span>
+            <span><i class="fas fa-money-bill-transfer me-1"></i><span id="txnFormTitle">New Transaction</span></span>
             ${canManageAccounts ? '<button class="btn btn-sm btn-outline-secondary" id="manageAcctBtn"><i class="fas fa-wallet"></i> Accounts</button>' : ''}
           </div>
           <div class="card-body">
@@ -3988,19 +3815,38 @@ PAGES.mobilebanking = async function (mount, session) {
               <select class="form-select" id="txnType">
                 <option value="bill">Utility Bill Payment</option>
                 <option value="send">Send Money / Mobile Load</option>
-                <option value="cashin">Cash In (Load Account)</option>
-                <option value="cashout">Cash Out (Withdraw)</option>
+                <option value="cashin">Cash In (Customer Deposits Cash)</option>
+                <option value="cashout">Cash Out (Customer Withdraws Cash)</option>
+                <option value="transfer">Transfer Between Own Accounts</option>
                 <option value="supplier_payment">Pay Supplier</option>
               </select>
             </div>
-            <div class="mb-2">
-              <label class="form-label small">Account Used</label>
+
+            <div class="mb-2" id="txnAccountWrap">
+              <label class="form-label small" id="txnAccountLabel">Account Used</label>
               <select class="form-select" id="txnAccount"></select>
+              <div class="form-check mt-2 d-none" id="payLaterWrap">
+                <input class="form-check-input" type="checkbox" id="payLaterChk" checked>
+                <label class="form-check-label small" for="payLaterChk">We haven't paid this bill yet (mark as Pay Later)</label>
+              </div>
             </div>
+
+            <div class="row g-2 mb-2 d-none" id="transferFields">
+              <div class="col-6">
+                <label class="form-label small">From Account</label>
+                <select class="form-select" id="txnFromAccount"></select>
+              </div>
+              <div class="col-6">
+                <label class="form-label small">To Account</label>
+                <select class="form-select" id="txnToAccount"></select>
+              </div>
+            </div>
+
             <div class="mb-2" id="billerField">
               <label class="form-label small" id="billerLabel">Biller / Company Name</label>
               <input class="form-control" id="txnBiller" placeholder="e.g. K-Electric, SSGC, PTCL">
             </div>
+
             <div class="mb-2 d-none" id="supplierField">
               <label class="form-label small">Supplier</label>
               <div class="input-group">
@@ -4008,6 +3854,14 @@ PAGES.mobilebanking = async function (mount, session) {
                 <button class="btn btn-outline-secondary" type="button" id="txnQuickAddSupBtn" title="Add new supplier"><i class="fas fa-plus"></i></button>
               </div>
               <div class="small mt-1" id="txnSupInfoBox"></div>
+            </div>
+            <div class="mb-2 d-none" id="supplierModeWrap">
+              <label class="form-label small">How Are We Paying?</label>
+              <select class="form-select" id="txnSupplierMode">
+                <option value="account">From a Mobile/Bank Account</option>
+                <option value="cash">With Cash</option>
+                <option value="credit">Not Paying Now — Take on Credit</option>
+              </select>
             </div>
 
             <div class="mb-2" id="custSectionWrap">
@@ -4018,20 +3872,20 @@ PAGES.mobilebanking = async function (mount, session) {
               </div>
               <div class="small mt-1" id="txnCustInfoBox"></div>
             </div>
-            <div class="row g-2 mb-2">
+            <div class="row g-2 mb-2" id="custNamePhoneRow">
               <div class="col-6"><label class="form-label small">Customer Name</label><input class="form-control" id="txnCustName"></div>
               <div class="col-6"><label class="form-label small">Customer Phone</label><input class="form-control" id="txnCustPhone"></div>
             </div>
-            <div class="d-flex align-items-center gap-2 mb-2">
+            <div class="d-flex align-items-center gap-2 mb-2" id="custPhotoRow">
               <img id="txnPhotoThumb" src="" style="width:36px;height:36px;object-fit:cover;border-radius:50%;display:none;border:1px solid #e5e7f0;">
               <button type="button" class="btn btn-outline-secondary btn-sm" id="txnCaptureBtn"><i class="fas fa-camera me-1"></i>Customer Photo <span class="text-muted">(optional)</span></button>
               <button type="button" class="btn btn-outline-danger btn-sm d-none" id="txnRemovePhotoBtn"><i class="fas fa-trash"></i></button>
             </div>
             <div class="row g-2 mb-2">
               <div class="col-6"><label class="form-label small">Amount</label><input type="number" min="0" class="form-control" id="txnAmount"></div>
-              <div class="col-6"><label class="form-label small">Your Commission</label><input type="number" min="0" class="form-control" id="txnCommission" value="0"></div>
+              <div class="col-6" id="commissionWrap"><label class="form-label small">Your Commission</label><input type="number" min="0" class="form-control" id="txnCommission" value="0"></div>
             </div>
-            <div class="d-flex justify-content-between small fw-semibold border-top pt-1"><span>Total Due From Customer</span><span id="txnTotalDue">${APP.fmt(0)}</span></div>
+            <div class="d-flex justify-content-between small fw-semibold border-top pt-1" id="totalDueRow"><span>Total Due From Customer</span><span id="txnTotalDue">${APP.fmt(0)}</span></div>
 
             <div class="form-check mt-2 d-none" id="txnUseWalletWrap">
               <input class="form-check-input" type="checkbox" id="txnUseWalletChk" checked>
@@ -4039,11 +3893,11 @@ PAGES.mobilebanking = async function (mount, session) {
             </div>
             <div class="d-flex justify-content-between small text-success d-none" id="txnWalletAppliedRow"><span>Wallet Applied</span><span id="txnSumWalletApplied">${APP.fmt(0)}</span></div>
 
-            <div class="mb-2 mt-2">
+            <div class="mb-2 mt-2" id="custGivenWrap">
               <label class="form-label small">Amount Customer Gave</label>
               <input type="number" min="0" class="form-control" id="txnCustGiven" placeholder="0">
             </div>
-            <div class="d-flex justify-content-between small mt-1">
+            <div class="d-flex justify-content-between small mt-1" id="changeDueWrap">
               <span>Change to Return</span><strong id="txnChangeDue">${APP.fmt(0)}</strong>
             </div>
             <div class="form-check mt-1 d-none" id="txnAddToWalletWrap">
@@ -4052,7 +3906,7 @@ PAGES.mobilebanking = async function (mount, session) {
             </div>
             <div class="alert alert-warning py-2 small mt-2 d-none" id="txnCreditWarningBox"></div>
 
-            <div class="mb-2 mt-2">
+            <div class="mb-2 mt-2" id="genericPaymentModeWrap">
               <label class="form-label small">Payment Mode</label>
               <select class="form-select" id="txnPaymentMode">
                 <option value="cash">Cash</option>
@@ -4060,17 +3914,42 @@ PAGES.mobilebanking = async function (mount, session) {
               </select>
             </div>
             <div class="mb-2"><label class="form-label small">Note (optional)</label><input class="form-control" id="txnNote"></div>
-            <button class="btn btn-brand w-100 mt-1" id="saveTxnBtn"><i class="fas fa-circle-check me-1"></i>Record Transaction</button>
+            <div class="d-flex gap-2">
+              <button class="btn btn-brand w-100 mt-1" id="saveTxnBtn"><i class="fas fa-circle-check me-1"></i>Record Transaction</button>
+              <button class="btn btn-outline-secondary mt-1 d-none" id="cancelEditBtn">Cancel</button>
+            </div>
           </div>
         </div>
       </div>
 
       <div class="col-lg-7">
+        <div class="card mb-3" id="pendingBillsCard" style="display:none;">
+          <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <span><i class="fas fa-clock me-1"></i>Pay Later — Bills We've Collected But Not Yet Paid</span>
+            <span class="text-muted small" id="pendingBillsTotal"></span>
+          </div>
+          <div class="card-body p-0">
+            <div class="d-flex flex-wrap gap-2 align-items-center p-2 border-bottom">
+              <label class="form-label small mb-0">Filter</label>
+              <select class="form-select form-select-sm w-auto" id="pendingAcctFilter"><option value="">All Accounts</option></select>
+            </div>
+            <div class="d-flex flex-wrap gap-2 align-items-center p-2 border-bottom bg-light">
+              <label class="form-label small mb-0 fw-semibold">Settle From Account</label>
+              <select class="form-select form-select-sm w-auto" id="payFromAcctSelect"><option value="">— Choose account —</option></select>
+              <button class="btn btn-sm btn-outline-success ms-auto" id="markSelectedPaidBtn" disabled><i class="fas fa-check-double me-1"></i>Mark Selected as Paid</button>
+            </div>
+            <table class="table table-sm mb-0">
+              <thead><tr><th><input type="checkbox" id="pendingSelectAll"></th><th>Date</th><th>Biller</th><th>Planned Account</th><th>Customer</th><th class="text-end">Amount</th><th class="text-end"></th></tr></thead>
+              <tbody id="pendingBillsBody"></tbody>
+            </table>
+          </div>
+        </div>
+
         <div class="card">
           <div class="card-header">Transaction History</div>
           <div class="card-body p-0" style="max-height: 560px; overflow-y:auto;">
             <table class="table table-sm mb-0">
-              <thead><tr><th></th><th>Date</th><th>Type</th><th>Account</th><th>Customer</th><th>Mode</th><th class="text-end">Amount</th><th class="text-end">Commission</th><th class="text-end">Receipt</th></tr></thead>
+              <thead><tr><th></th><th>Date</th><th>Type</th><th>Account</th><th>Customer</th><th>Status</th><th class="text-end">Amount</th><th class="text-end">Comm.</th><th class="text-end">Actions</th></tr></thead>
               <tbody id="txnBody"></tbody>
             </table>
           </div>
@@ -4140,13 +4019,33 @@ PAGES.mobilebanking = async function (mount, session) {
     </div>
   `;
 
+  // ---------------------------------------------------------------
+  // Balances: cashin / cashout / sale all bring money INTO an account
+  // (cash-in = customer deposits cash, we credit their wallet from our
+  // account... no wait — see note below). bill / send / supplier_payment
+  // (paid from account) take money OUT of an account. Transfers move
+  // between two of our own accounts.
+  // ---------------------------------------------------------------
   function balanceOf(acctId) {
     const acct = accounts.find(a => a.id === acctId);
     if (!acct) return 0;
     let bal = acct.openingBalance || 0;
-    txns.filter(t => t.accountId === acctId).forEach(t => {
-      if (t.type === 'cashin' || t.type === 'sale') bal += t.amount;
-      else bal -= t.amount; // bill, send, cashout all reduce the mobile-account balance
+    txns.forEach(t => {
+      if (t.type === 'transfer') {
+        if (t.fromAccountId === acctId) bal -= t.amount;
+        if (t.toAccountId === acctId) bal += t.amount;
+        return;
+      }
+      if (t.accountId !== acctId) return;
+      // A "Pay Later" bill hasn't actually been paid to the biller yet, so it
+      // must not affect any account's balance until it's marked as paid.
+      if (t.type === 'bill' && t.billStatus === 'pending') return;
+      // Cash In: customer gives us physical cash, we send them the equivalent
+      //   from our account -> our account balance goes DOWN.
+      // Cash Out: customer sends money from their wallet into our account,
+      //   we hand them physical cash -> our account balance goes UP.
+      if (t.type === 'cashout' || t.type === 'sale') bal += t.amount;
+      else bal -= t.amount; // bill, send, cashin, supplier_payment (via account)
     });
     return bal;
   }
@@ -4164,23 +4063,65 @@ PAGES.mobilebanking = async function (mount, session) {
   }
 
   function fillAccountSelect() {
-    document.getElementById('txnAccount').innerHTML = accounts.map(a => `<option value="${a.id}">${a.type === 'bank' ? '[Bank] ' : '[Wallet] '}${APP.escapeHtml(a.provider)} - ${APP.escapeHtml(a.label)} (${APP.escapeHtml(a.accountNumber)})</option>`).join('');
+    const opts = accounts.map(a => `<option value="${a.id}">${a.type === 'bank' ? '[Bank] ' : '[Wallet] '}${APP.escapeHtml(a.provider)} - ${APP.escapeHtml(a.label)} (${APP.escapeHtml(a.accountNumber)})</option>`).join('');
+    document.getElementById('txnAccount').innerHTML = opts;
+    document.getElementById('txnFromAccount').innerHTML = opts;
+    document.getElementById('txnToAccount').innerHTML = opts;
   }
 
-  function updateBillerFieldLabel() {
+  // ---- field visibility per transaction type ----
+  function updateTypeFieldsVisibility() {
     const type = document.getElementById('txnType').value;
-    const wrap = document.getElementById('billerField');
-    const supWrap = document.getElementById('supplierField');
-    const custWrap = document.getElementById('custSectionWrap');
+    const show = (id, on) => document.getElementById(id).classList.toggle('d-none', !on);
+
+    show('txnAccountWrap', type !== 'transfer' && type !== 'supplier_payment');
+    show('transferFields', type === 'transfer');
+    show('billerField', type === 'bill' || type === 'send');
+    show('payLaterWrap', type === 'bill');
+    show('supplierField', type === 'supplier_payment');
+    show('supplierModeWrap', type === 'supplier_payment');
+    show('custSectionWrap', type === 'bill' || type === 'send');
+    show('custNamePhoneRow', type === 'bill' || type === 'send');
+    show('custPhotoRow', type === 'bill' || type === 'send');
+    show('commissionWrap', type !== 'transfer' && type !== 'supplier_payment');
+    show('totalDueRow', type === 'bill' || type === 'send');
+    show('custGivenWrap', type === 'bill' || type === 'send');
+    show('changeDueWrap', type === 'bill' || type === 'send');
+    show('genericPaymentModeWrap', type === 'bill' || type === 'send' || type === 'cashin' || type === 'cashout');
+
     const label = document.getElementById('billerLabel');
     const input = document.getElementById('txnBiller');
-    if (type === 'bill') { wrap.classList.remove('d-none'); supWrap.classList.add('d-none'); custWrap.classList.remove('d-none'); label.textContent = 'Biller / Company Name'; input.placeholder = 'e.g. K-Electric, SSGC, PTCL'; }
-    else if (type === 'send') { wrap.classList.remove('d-none'); supWrap.classList.add('d-none'); custWrap.classList.remove('d-none'); label.textContent = 'Receiver Number'; input.placeholder = 'e.g. 0300-XXXXXXX'; }
-    else if (type === 'supplier_payment') { wrap.classList.add('d-none'); supWrap.classList.remove('d-none'); custWrap.classList.add('d-none'); updateTxnSupInfo(); }
-    else { wrap.classList.add('d-none'); supWrap.classList.add('d-none'); custWrap.classList.add('d-none'); }
+    if (type === 'bill') { label.textContent = 'Biller / Company Name'; input.placeholder = 'e.g. K-Electric, SSGC, PTCL'; }
+    else if (type === 'send') { label.textContent = 'Receiver Number'; input.placeholder = 'e.g. 0300-XXXXXXX'; }
+
+    updateAccountLabel();
+
+    if (type === 'supplier_payment') updateTxnSupInfo();
+    if (type === 'supplier_payment') updateSupplierModeUI();
+
+    if (!(type === 'bill' || type === 'send')) {
+      const walletWrap = document.getElementById('txnUseWalletWrap');
+      walletWrap.classList.add('d-none');
+      document.getElementById('txnUseWalletChk').checked = false;
+    }
+
     recalcTxn();
   }
-  document.getElementById('txnType').addEventListener('change', updateBillerFieldLabel);
+  document.getElementById('txnType').addEventListener('change', updateTypeFieldsVisibility);
+
+  function updateAccountLabel() {
+    const type = document.getElementById('txnType').value;
+    const label = document.getElementById('txnAccountLabel');
+    const payLater = type === 'bill' && document.getElementById('payLaterChk').checked;
+    label.textContent = payLater ? 'Planned Account (you can change this when you actually settle it)' : 'Account Used';
+  }
+  document.getElementById('payLaterChk').addEventListener('change', updateAccountLabel);
+
+  function updateSupplierModeUI() {
+    const mode = document.getElementById('txnSupplierMode').value;
+    document.getElementById('txnAccountWrap').classList.toggle('d-none', mode !== 'account');
+  }
+  document.getElementById('txnSupplierMode').addEventListener('change', updateSupplierModeUI);
 
   function fillTxnSupplierSelect() {
     document.getElementById('txnSupplier').innerHTML = suppliers.map(s => `<option value="${s.id}">${APP.escapeHtml(s.name)}</option>`).join('');
@@ -4242,7 +4183,8 @@ PAGES.mobilebanking = async function (mount, session) {
     if (wallet > 0) html += `<span class="badge badge-stock-ok me-1"><i class="fas fa-wallet"></i> Wallet: ${APP.fmt(wallet)}</span>`;
     if (credit > 0) html += `<span class="badge badge-stock-low"><i class="fas fa-triangle-exclamation"></i> Owes: ${APP.fmt(credit)}</span>`;
     box.innerHTML = html;
-    if (wallet > 0) {
+    const type = document.getElementById('txnType').value;
+    if (wallet > 0 && (type === 'bill' || type === 'send')) {
       walletWrap.classList.remove('d-none');
       document.getElementById('txnUseWalletChk').checked = true;
       document.getElementById('txnWalletLabel').textContent = `Use wallet balance (${APP.fmt(wallet)} available)`;
@@ -4273,11 +4215,12 @@ PAGES.mobilebanking = async function (mount, session) {
 
   function recalcTxn() {
     const amount = Number(document.getElementById('txnAmount').value) || 0;
-    const commission = Number(document.getElementById('txnCommission').value) || 0;
+    const type = document.getElementById('txnType').value;
+    const commission = (type === 'bill' || type === 'send') ? (Number(document.getElementById('txnCommission').value) || 0) : 0;
     const totalDue = amount + commission;
     document.getElementById('txnTotalDue').textContent = APP.fmt(totalDue);
 
-    const cust = getSelectedTxnCustomer();
+    const cust = (type === 'bill' || type === 'send') ? getSelectedTxnCustomer() : null;
     const useWallet = document.getElementById('txnUseWalletChk').checked && cust;
     const walletApplied = useWallet ? Math.min(cust.walletBalance || 0, totalDue) : 0;
     const walletRow = document.getElementById('txnWalletAppliedRow');
@@ -4290,6 +4233,13 @@ PAGES.mobilebanking = async function (mount, session) {
 
     const addToWalletWrap = document.getElementById('txnAddToWalletWrap');
     const creditBox = document.getElementById('txnCreditWarningBox');
+
+    if (!(type === 'bill' || type === 'send')) {
+      document.getElementById('txnChangeDue').textContent = APP.fmt(0);
+      addToWalletWrap.classList.add('d-none');
+      creditBox.classList.add('d-none');
+      return { amount, commission, totalDue, walletApplied: 0, given: 0, effectivePaid: 0, diff: 0 };
+    }
 
     if (diff > 0) {
       document.getElementById('txnChangeDue').textContent = APP.fmt(diff);
@@ -4330,31 +4280,149 @@ PAGES.mobilebanking = async function (mount, session) {
   });
   document.getElementById('txnRemovePhotoBtn').addEventListener('click', () => setTxnPhoto(null));
 
+  // ---- pending "Pay Later" bills ----
+  function renderPendingBills() {
+    const allPending = txns.filter(t => t.type === 'bill' && t.billStatus === 'pending');
+    const card = document.getElementById('pendingBillsCard');
+    if (!allPending.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+
+    // Settle-from account dropdown — any registered account can be chosen at settlement time.
+    const payFromSel = document.getElementById('payFromAcctSelect');
+    const prevPayFromVal = payFromSel.value;
+    payFromSel.innerHTML = '<option value="">— Choose account —</option>' +
+      accounts.map(a => `<option value="${a.id}">${APP.escapeHtml(a.provider)} - ${APP.escapeHtml(a.label)}</option>`).join('');
+    if (accounts.some(a => String(a.id) === prevPayFromVal)) payFromSel.value = prevPayFromVal;
+
+    // Account filter dropdown — only planned accounts that actually have pending bills.
+    const acctFilterSel = document.getElementById('pendingAcctFilter');
+    const usedAcctIds = [...new Set(allPending.map(t => t.accountId).filter(Boolean))];
+    const prevFilterVal = acctFilterSel.value;
+    acctFilterSel.innerHTML = '<option value="">All Accounts</option>' +
+      usedAcctIds.map(id => {
+        const a = accounts.find(x => x.id === id);
+        return a ? `<option value="${id}">${APP.escapeHtml(a.provider)} - ${APP.escapeHtml(a.label)}</option>` : '';
+      }).join('');
+    if (usedAcctIds.some(id => String(id) === prevFilterVal)) acctFilterSel.value = prevFilterVal;
+
+    const filterId = acctFilterSel.value;
+    const pending = filterId ? allPending.filter(t => String(t.accountId) === filterId) : allPending;
+
+    const total = pending.reduce((s, t) => s + t.amount, 0);
+    document.getElementById('pendingBillsTotal').textContent = `${pending.length} of ${allPending.length} bill(s) — ${APP.fmt(total)} to pay`;
+
+    document.getElementById('pendingBillsBody').innerHTML = pending.map(t => {
+      const acct = accounts.find(a => a.id === t.accountId);
+      return `
+      <tr>
+        <td><input type="checkbox" class="pendingBillChk" data-id="${t.id}"></td>
+        <td class="small text-muted">${APP.fmtDate(t.date)}</td>
+        <td class="small">${APP.escapeHtml(t.biller || '—')}</td>
+        <td class="small">${acct ? APP.escapeHtml(acct.provider) + ' - ' + APP.escapeHtml(acct.label) : '—'}</td>
+        <td class="small">${APP.escapeHtml(t.custName || '—')}</td>
+        <td class="text-end">${APP.fmt(t.amount)}</td>
+        <td class="text-end"><button class="btn btn-sm btn-outline-success markPaidBtn" data-id="${t.id}"><i class="fas fa-check me-1"></i>Mark as Paid</button></td>
+      </tr>`;
+    }).join('');
+
+    document.getElementById('pendingSelectAll').checked = false;
+    document.getElementById('markSelectedPaidBtn').disabled = true;
+
+    function markPaid(ids) {
+      const payFromId = Number(document.getElementById('payFromAcctSelect').value) || null;
+      if (!payFromId) { APP.toast('Choose which account you are settling this from first', 'warning'); return; }
+      const acct = accounts.find(a => a.id === payFromId);
+      const totalAmount = txns.filter(t => ids.includes(t.id)).reduce((s, t) => s + t.amount, 0);
+      if (balanceOf(payFromId) < totalAmount) {
+        if (!APP.confirmAction(`${acct ? acct.provider + ' - ' + acct.label : 'This account'} balance looks lower than the total being settled (${APP.fmt(totalAmount)}). Continue anyway?`)) return;
+      }
+      const idSet = new Set(ids);
+      txns = txns.map(t => idSet.has(t.id) ? { ...t, billStatus: 'paid', accountId: payFromId } : t);
+      DB.saveMbTransactions(txns);
+      DB.logActivity(session.fullName, 'Bill Marked Paid', `${ids.length} bill(s) — ${APP.fmt(totalAmount)} — ${acct ? acct.provider + ' - ' + acct.label : ''}`);
+      renderAccountCards();
+      renderPendingBills();
+      renderTxnHistory();
+      APP.toast(ids.length > 1 ? `${ids.length} bills marked as paid from ${acct.provider}` : `Bill marked as paid from ${acct.provider}`);
+    }
+
+    document.getElementById('pendingBillsBody').querySelectorAll('.markPaidBtn').forEach(b => b.addEventListener('click', () => markPaid([Number(b.dataset.id)])));
+
+    const checkboxes = () => Array.from(document.getElementById('pendingBillsBody').querySelectorAll('.pendingBillChk'));
+    function updateBulkBtn() {
+      const checked = checkboxes().filter(c => c.checked);
+      const btn = document.getElementById('markSelectedPaidBtn');
+      btn.disabled = checked.length === 0;
+      btn.innerHTML = checked.length ? `<i class="fas fa-check-double me-1"></i>Mark ${checked.length} Selected as Paid` : `<i class="fas fa-check-double me-1"></i>Mark Selected as Paid`;
+    }
+    checkboxes().forEach(c => c.addEventListener('change', updateBulkBtn));
+    document.getElementById('markSelectedPaidBtn').onclick = () => {
+      const ids = checkboxes().filter(c => c.checked).map(c => Number(c.dataset.id));
+      if (ids.length) markPaid(ids);
+    };
+  }
+  document.getElementById('pendingAcctFilter').addEventListener('change', renderPendingBills);
+  document.getElementById('pendingSelectAll').addEventListener('change', (e) => {
+    document.querySelectorAll('.pendingBillChk').forEach(c => { c.checked = e.target.checked; });
+    const checked = document.querySelectorAll('.pendingBillChk:checked');
+    const btn = document.getElementById('markSelectedPaidBtn');
+    btn.disabled = checked.length === 0;
+    btn.innerHTML = checked.length ? `<i class="fas fa-check-double me-1"></i>Mark ${checked.length} Selected as Paid` : `<i class="fas fa-check-double me-1"></i>Mark Selected as Paid`;
+  });
+
   function renderTxnHistory() {
     const sorted = [...txns].sort((a, b) => new Date(b.date) - new Date(a.date));
     document.getElementById('txnBody').innerHTML = sorted.length ? sorted.map(t => {
-      const acct = accounts.find(a => a.id === t.accountId);
+      let acctText = '—';
+      if (t.type === 'transfer') {
+        const from = accounts.find(a => a.id === t.fromAccountId);
+        const to = accounts.find(a => a.id === t.toAccountId);
+        acctText = `${from ? APP.escapeHtml(from.provider) : '?'} → ${to ? APP.escapeHtml(to.provider) : '?'}`;
+      } else {
+        const acct = accounts.find(a => a.id === t.accountId);
+        acctText = acct ? APP.escapeHtml(acct.provider) : (t.type === 'supplier_payment' ? '(cash / credit)' : '—');
+      }
+      let statusHtml = '—';
+      if (t.type === 'bill') statusHtml = t.billStatus === 'pending' ? '<span class="badge badge-stock-low">Pay Later</span>' : '<span class="badge badge-stock-ok">Paid</span>';
+      else if (t.type === 'supplier_payment') statusHtml = { account: 'Account', cash: 'Cash', credit: 'On Credit' }[t.supplierMode] || '—';
+      else if (t.paymentMode) statusHtml = t.paymentMode === 'credit' ? '<span class="badge badge-stock-low">Credit</span>' : '<span class="badge badge-stock-ok">Cash</span>';
+
       return `
       <tr>
         <td>${t.custPhoto ? `<img src="${t.custPhoto}" style="width:30px;height:30px;object-fit:cover;border-radius:50%;">` : ''}</td>
         <td class="small text-muted">${APP.fmtDate(t.date)}</td>
         <td><span class="badge bg-light text-dark border">${TYPE_LABELS[t.type] || t.type}</span></td>
-        <td class="small">${acct ? APP.escapeHtml(acct.provider) : '—'}</td>
-        <td class="small">${APP.escapeHtml(t.custName || '—')}${t.biller ? ' · ' + APP.escapeHtml(t.biller) : ''}</td>
-        <td class="small">${t.paymentMode === 'credit' ? '<span class="badge badge-stock-low">Credit</span>' : '<span class="badge badge-stock-ok">Cash</span>'}</td>
+        <td class="small">${acctText}</td>
+        <td class="small">${APP.escapeHtml(t.custName || '—')}${t.biller ? ' · ' + APP.escapeHtml(t.biller) : ''}${t.supplierId ? ' · ' + APP.escapeHtml((suppliers.find(s => s.id === t.supplierId) || {}).name || '') : ''}</td>
+        <td class="small">${statusHtml}</td>
         <td class="text-end">${APP.fmt(t.amount)}</td>
         <td class="text-end text-success">${t.commission ? '+' + APP.fmt(t.commission) : '—'}</td>
-        <td class="text-end"><button class="btn btn-sm btn-outline-secondary viewTxnBtn" data-id="${t.id}" data-ro-safe="true"><i class="fas fa-receipt me-1"></i>Print</button></td>
+        <td class="text-end text-nowrap">
+          <button class="btn btn-sm btn-outline-secondary viewTxnBtn" data-id="${t.id}" data-ro-safe="true" title="Print"><i class="fas fa-receipt"></i></button>
+          ${t.type !== 'sale' ? `<button class="btn btn-sm btn-outline-secondary editTxnBtn" data-id="${t.id}" title="Edit"><i class="fas fa-pen"></i></button>` : ''}
+          ${t.type !== 'sale' ? `<button class="btn btn-sm btn-outline-danger delTxnBtn" data-id="${t.id}" title="Delete"><i class="fas fa-trash"></i></button>` : ''}
+        </td>
       </tr>`;
     }).join('') : `<tr><td colspan="9" class="text-center text-muted py-4">No transactions recorded yet.</td></tr>`;
     document.getElementById('txnBody').querySelectorAll('.viewTxnBtn').forEach(b => b.addEventListener('click', () => showTxnReceipt(Number(b.dataset.id))));
+    document.getElementById('txnBody').querySelectorAll('.editTxnBtn').forEach(b => b.addEventListener('click', () => startEditTxn(Number(b.dataset.id))));
+    document.getElementById('txnBody').querySelectorAll('.delTxnBtn').forEach(b => b.addEventListener('click', () => deleteTxn(Number(b.dataset.id))));
   }
 
   function showTxnReceipt(id) {
     const t = txns.find(x => x.id === id);
     if (!t) return;
-    const acct = accounts.find(a => a.id === t.accountId);
     const settings = DB.getSettings();
+    let acctLine = '';
+    if (t.type === 'transfer') {
+      const from = accounts.find(a => a.id === t.fromAccountId);
+      const to = accounts.find(a => a.id === t.toAccountId);
+      acctLine = `<div>From: ${from ? APP.escapeHtml(from.provider + ' - ' + from.label) : '—'}</div><div>To: ${to ? APP.escapeHtml(to.provider + ' - ' + to.label) : '—'}</div>`;
+    } else {
+      const acct = accounts.find(a => a.id === t.accountId);
+      const acctWord = (t.type === 'bill' && t.billStatus === 'pending') ? 'Planned Account (Pay Later)' : 'Account';
+      acctLine = acct ? `<div>${acctWord}: ${APP.escapeHtml(acct.provider + ' - ' + acct.label)}</div><div>Account No: ${APP.escapeHtml(acct.accountNumber)}</div>` : (t.type === 'supplier_payment' ? `<div>Paid via: ${t.supplierMode === 'cash' ? 'Cash' : t.supplierMode === 'credit' ? 'Taken on Credit' : '—'}</div>` : '');
+    }
     document.getElementById('mbPrintArea').innerHTML = `
       <div class="receipt">
         <div class="text-center">
@@ -4368,22 +4436,22 @@ PAGES.mobilebanking = async function (mount, session) {
         <div>Date: ${APP.fmtDate(t.date)}</div>
         <div>Handled by: ${APP.escapeHtml(t.userName || '')}</div>
         <hr>
-        <div>Account: ${acct ? APP.escapeHtml(acct.provider + ' - ' + acct.label) : '—'}</div>
-        <div>Account No: ${acct ? APP.escapeHtml(acct.accountNumber) : '—'}</div>
+        ${acctLine}
         ${t.biller ? `<div>Biller / Receiver: ${APP.escapeHtml(t.biller)}</div>` : ''}
+        ${t.type === 'bill' ? `<div>Status: ${t.billStatus === 'pending' ? 'PAY LATER — not yet paid to biller' : 'Paid'}</div>` : ''}
         ${t.supplierId ? `<div>Supplier: ${APP.escapeHtml((suppliers.find(s => s.id === t.supplierId) || {}).name || '')}</div>` : ''}
         ${t.custName ? `<div>Customer: ${APP.escapeHtml(t.custName)}${t.custPhone ? ' (' + APP.escapeHtml(t.custPhone) + ')' : ''}</div>` : ''}
         ${t.note ? `<div>Note: ${APP.escapeHtml(t.note)}</div>` : ''}
         <hr>
         <div class="d-flex justify-content-between"><span>Amount</span><span>${APP.fmt(t.amount)}</span></div>
         ${t.commission ? `<div class="d-flex justify-content-between"><span>Commission</span><span>+${APP.fmt(t.commission)}</span></div>` : ''}
-        <div class="d-flex justify-content-between fw-bold"><span>Total Due</span><span>${APP.fmt((t.amount || 0) + (t.commission || 0))}</span></div>
+        ${(t.type === 'bill' || t.type === 'send') ? `<div class="d-flex justify-content-between fw-bold"><span>Total Due</span><span>${APP.fmt((t.amount || 0) + (t.commission || 0))}</span></div>` : ''}
         ${t.walletApplied ? `<div class="d-flex justify-content-between"><span>Wallet Applied</span><span>-${APP.fmt(t.walletApplied)}</span></div>` : ''}
-        <div class="d-flex justify-content-between"><span>Customer Gave</span><span>${APP.fmt(t.customerGiven || 0)}</span></div>
-        <div class="d-flex justify-content-between"><span>Change Returned</span><span>${APP.fmt(t.changeReturned || 0)}</span></div>
+        ${(t.type === 'bill' || t.type === 'send') ? `<div class="d-flex justify-content-between"><span>Customer Gave</span><span>${APP.fmt(t.customerGiven || 0)}</span></div>` : ''}
+        ${(t.type === 'bill' || t.type === 'send') ? `<div class="d-flex justify-content-between"><span>Change Returned</span><span>${APP.fmt(t.changeReturned || 0)}</span></div>` : ''}
         ${t.addedToWallet ? `<div class="d-flex justify-content-between text-success"><span>Added to Wallet</span><span>${APP.fmt(t.addedToWallet)}</span></div>` : ''}
         ${t.creditAdded ? `<div class="d-flex justify-content-between text-danger"><span>Added as Credit</span><span>${APP.fmt(t.creditAdded)}</span></div>` : ''}
-        <div>Payment Mode: ${t.paymentMode === 'credit' ? 'Credit (not yet settled)' : 'Cash'}</div>
+        ${t.paymentMode ? `<div>Payment Mode: ${t.paymentMode === 'credit' ? 'Credit (not yet settled)' : 'Cash'}</div>` : ''}
         <hr>
         <div class="text-center small">${APP.escapeHtml(settings.receiptFooter || '')}</div>
         <hr>
@@ -4392,21 +4460,180 @@ PAGES.mobilebanking = async function (mount, session) {
     new bootstrap.Modal(document.getElementById('mbReceiptModal')).show();
   }
 
+  // Undo the stored side-effects of a transaction (customer wallet/credit,
+  // supplier credit) so it can be safely edited or deleted.
+  function reverseTxnEffects(t) {
+    if (t.customerId) {
+      customers = customers.map(c => {
+        if (c.id !== t.customerId) return c;
+        let wallet = c.walletBalance || 0;
+        let credit = c.creditBalance || 0;
+        if (t.walletApplied) wallet += t.walletApplied;
+        if (t.addedToWallet) wallet -= t.addedToWallet;
+        if (t.creditAdded) credit -= t.creditAdded;
+        return { ...c, walletBalance: Math.max(wallet, 0), creditBalance: Math.max(credit, 0) };
+      });
+      DB.saveCustomers(customers);
+    }
+    if (t.type === 'supplier_payment' && t.supplierId) {
+      suppliers = suppliers.map(s => {
+        if (s.id !== t.supplierId) return s;
+        let credit = s.creditBalance || 0;
+        if (t.supplierMode === 'credit') credit -= t.amount; // undo the increase
+        else credit += t.amount; // undo the decrease (account/cash payment)
+        return { ...s, creditBalance: Math.max(credit, 0) };
+      });
+      DB.saveSuppliers(suppliers);
+    }
+  }
+
+  function deleteTxn(id) {
+    const t = txns.find(x => x.id === id);
+    if (!t) return;
+    if (!APP.confirmAction('Delete this transaction? Any related wallet, credit, or account balance effects will be reversed.')) return;
+    reverseTxnEffects(t);
+    txns = txns.filter(x => x.id !== id);
+    DB.saveMbTransactions(txns);
+    DB.logActivity(session.fullName, 'Mobile Banking Txn Deleted', `${TYPE_LABELS[t.type] || t.type} — ${APP.fmt(t.amount)}`);
+    renderAccountCards();
+    renderPendingBills();
+    renderTxnHistory();
+    APP.toast('Transaction deleted');
+  }
+
+  function startEditTxn(id) {
+    const t = txns.find(x => x.id === id);
+    if (!t) return;
+    editingTxnId = id;
+    document.getElementById('txnFormTitle').textContent = 'Edit Transaction';
+    document.getElementById('saveTxnBtn').innerHTML = '<i class="fas fa-circle-check me-1"></i>Update Transaction';
+    document.getElementById('cancelEditBtn').classList.remove('d-none');
+
+    document.getElementById('txnType').value = t.type;
+    updateTypeFieldsVisibility();
+
+    if (t.type === 'transfer') {
+      document.getElementById('txnFromAccount').value = t.fromAccountId;
+      document.getElementById('txnToAccount').value = t.toAccountId;
+    } else if (t.type === 'supplier_payment') {
+      document.getElementById('txnSupplier').value = t.supplierId || '';
+      document.getElementById('txnSupplierMode').value = t.supplierMode || 'account';
+      updateSupplierModeUI();
+      if (t.accountId) document.getElementById('txnAccount').value = t.accountId;
+    } else if (t.accountId) {
+      document.getElementById('txnAccount').value = t.accountId;
+    }
+
+    document.getElementById('txnBiller').value = t.biller || '';
+    document.getElementById('payLaterChk').checked = t.billStatus !== 'paid';
+    document.getElementById('txnCustSelect').value = t.customerId || '';
+    document.getElementById('txnCustName').value = t.custName || '';
+    document.getElementById('txnCustPhone').value = t.custPhone || '';
+    setTxnPhoto(t.custPhoto || null);
+    document.getElementById('txnAmount').value = t.amount || '';
+    document.getElementById('txnCommission').value = t.commission || 0;
+    document.getElementById('txnCustGiven').value = t.customerGiven || '';
+    document.getElementById('txnAddToWalletChk').checked = !!t.addedToWallet;
+    document.getElementById('txnPaymentMode').value = t.paymentMode || 'cash';
+    document.getElementById('txnNote').value = t.note || '';
+
+    if (t.customerId) updateTxnCustInfo();
+    recalcTxn();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function cancelEdit() {
+    editingTxnId = null;
+    document.getElementById('txnFormTitle').textContent = 'New Transaction';
+    document.getElementById('saveTxnBtn').innerHTML = '<i class="fas fa-circle-check me-1"></i>Record Transaction';
+    document.getElementById('cancelEditBtn').classList.add('d-none');
+    resetForm();
+  }
+  document.getElementById('cancelEditBtn').addEventListener('click', cancelEdit);
+
+  function resetForm() {
+    ['txnBiller', 'txnCustName', 'txnCustPhone', 'txnAmount', 'txnCustGiven', 'txnNote'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('txnCommission').value = 0;
+    document.getElementById('txnPaymentMode').value = 'cash';
+    document.getElementById('txnCustSelect').value = '';
+    document.getElementById('txnAddToWalletChk').checked = false;
+    document.getElementById('payLaterChk').checked = true;
+    document.getElementById('txnSupplierMode').value = 'account';
+    setTxnPhoto(null);
+    updateTxnCustInfo();
+    updateTypeFieldsVisibility();
+  }
+
   document.getElementById('saveTxnBtn').addEventListener('click', () => {
-    if (!accounts.length) { APP.toast('Add a mobile account first', 'warning'); return; }
     const type = document.getElementById('txnType').value;
-    const accountId = Number(document.getElementById('txnAccount').value);
+
+    // ---- Transfer between own accounts ----
+    if (type === 'transfer') {
+      const fromId = Number(document.getElementById('txnFromAccount').value);
+      const toId = Number(document.getElementById('txnToAccount').value);
+      const amount = Number(document.getElementById('txnAmount').value) || 0;
+      if (amount <= 0) { APP.toast('Enter a valid amount', 'warning'); return; }
+      if (fromId === toId) { APP.toast('From and To accounts must be different', 'warning'); return; }
+      if (editingTxnId) reverseTxnEffects(txns.find(x => x.id === editingTxnId));
+
+      const txnData = {
+        type, fromAccountId: fromId, toAccountId: toId, amount,
+        note: document.getElementById('txnNote').value.trim(),
+        userId: session.userId, userName: session.fullName
+      };
+      commitTxn(txnData);
+      DB.logActivity(session.fullName, 'Mobile Banking Txn', `Transfer — ${APP.fmt(amount)}`);
+      finishSave();
+      return;
+    }
+
+    if (!accounts.length && type !== 'supplier_payment') { APP.toast('Add a mobile account first', 'warning'); return; }
     const totals = recalcTxn();
     if (totals.amount <= 0) { APP.toast('Enter a valid amount', 'warning'); return; }
 
-    if ((type === 'bill' || type === 'send' || type === 'cashout' || type === 'supplier_payment') && balanceOf(accountId) < totals.amount) {
-      if (!APP.confirmAction('This account balance looks lower than the transaction amount. Continue anyway?')) return;
+    // ---- Supplier payment ----
+    if (type === 'supplier_payment') {
+      const supplierId = Number(document.getElementById('txnSupplier').value) || null;
+      if (!supplierId) { APP.toast('Select a supplier', 'warning'); return; }
+      const supplierMode = document.getElementById('txnSupplierMode').value;
+      let accountId = null;
+      if (supplierMode === 'account') {
+        accountId = Number(document.getElementById('txnAccount').value);
+        if (!accountId) { APP.toast('Select an account', 'warning'); return; }
+        if (balanceOf(accountId) < totals.amount) {
+          if (!APP.confirmAction('This account balance looks lower than the transaction amount. Continue anyway?')) return;
+        }
+      }
+      if (editingTxnId) reverseTxnEffects(txns.find(x => x.id === editingTxnId));
+
+      suppliers = suppliers.map(s => {
+        if (s.id !== supplierId) return s;
+        let credit = s.creditBalance || 0;
+        if (supplierMode === 'credit') credit += totals.amount;
+        else credit -= totals.amount; // account or cash payment reduces what we owe
+        return { ...s, creditBalance: Math.max(credit, 0) };
+      });
+      DB.saveSuppliers(suppliers);
+
+      const txnData = {
+        type, accountId, supplierId, supplierMode, amount: totals.amount,
+        note: document.getElementById('txnNote').value.trim(),
+        userId: session.userId, userName: session.fullName
+      };
+      commitTxn(txnData);
+      DB.logActivity(session.fullName, 'Mobile Banking Txn', `Pay Supplier (${supplierMode}) — ${APP.fmt(totals.amount)}`);
+      updateTxnSupInfo();
+      finishSave();
+      return;
     }
 
-    let supplierId = null;
-    if (type === 'supplier_payment') {
-      supplierId = Number(document.getElementById('txnSupplier').value) || null;
-      if (!supplierId) { APP.toast('Select a supplier', 'warning'); return; }
+    // ---- Bill / Send / Cash In / Cash Out ----
+    const accountId = Number(document.getElementById('txnAccount').value);
+    const isPayLater = type === 'bill' && document.getElementById('payLaterChk').checked;
+    // A Pay Later bill hasn't actually left any account yet, so a low-balance
+    // warning against the "planned" account here would be misleading.
+    if (!isPayLater && (type === 'bill' || type === 'send' || type === 'cashin') && balanceOf(accountId) < totals.amount) {
+      if (!APP.confirmAction('This account balance looks lower than the transaction amount. Continue anyway?')) return;
     }
 
     const cust = (type === 'bill' || type === 'send') ? getSelectedTxnCustomer() : null;
@@ -4417,6 +4644,8 @@ PAGES.mobilebanking = async function (mount, session) {
         if (!APP.confirmAction(`Rs ${Math.abs(totals.diff).toLocaleString()} will be added as credit for ${cust.name}. Continue?`)) return;
       }
     }
+
+    if (editingTxnId) reverseTxnEffects(txns.find(x => x.id === editingTxnId));
 
     const addToWallet = cust && totals.diff > 0 && document.getElementById('txnAddToWalletChk').checked;
     const creditAdded = totals.diff < 0 && cust ? Math.abs(totals.diff) : 0;
@@ -4436,13 +4665,10 @@ PAGES.mobilebanking = async function (mount, session) {
       DB.saveCustomers(customers);
     }
 
-    const txn = {
-      id: DB.nextId('mbTxn'),
-      date: new Date().toISOString(),
-      type,
-      accountId,
+    const txnData = {
+      type, accountId,
       biller: document.getElementById('txnBiller').value.trim(),
-      supplierId,
+      billStatus: type === 'bill' ? (document.getElementById('payLaterChk').checked ? 'pending' : 'paid') : undefined,
       customerId: cust ? cust.id : null,
       custName: document.getElementById('txnCustName').value.trim(),
       custPhone: document.getElementById('txnCustPhone').value.trim(),
@@ -4459,32 +4685,38 @@ PAGES.mobilebanking = async function (mount, session) {
       userId: session.userId,
       userName: session.fullName
     };
-    txns.push(txn);
-    DB.saveMbTransactions(txns);
+    commitTxn(txnData);
     const acctForLog = accounts.find(a => a.id === accountId);
     const acctLabel = acctForLog ? `${acctForLog.provider} - ${acctForLog.label}` : '';
     DB.logActivity(session.fullName, 'Mobile Banking Txn', `${TYPE_LABELS[type]} — ${APP.fmt(totals.amount)}${acctLabel ? ' — ' + acctLabel : ''}`);
-
-    if (type === 'supplier_payment' && supplierId) {
-      suppliers = suppliers.map(s => s.id === supplierId ? { ...s, creditBalance: Math.max((s.creditBalance || 0) - totals.amount, 0) } : s);
-      DB.saveSuppliers(suppliers);
-      updateTxnSupInfo();
-    }
-
-    renderAccountCards();
-    renderTxnHistory();
-    showTxnReceipt(txn.id);
-    APP.toast('Transaction recorded');
-
-    ['txnBiller', 'txnCustName', 'txnCustPhone', 'txnAmount', 'txnCustGiven', 'txnNote'].forEach(id => document.getElementById(id).value = '');
-    document.getElementById('txnCommission').value = 0;
-    document.getElementById('txnPaymentMode').value = 'cash';
-    document.getElementById('txnCustSelect').value = '';
-    document.getElementById('txnAddToWalletChk').checked = false;
-    setTxnPhoto(null);
-    updateTxnCustInfo();
-    recalcTxn();
+    finishSave();
   });
+
+  function commitTxn(data) {
+    if (editingTxnId) {
+      txns = txns.map(t => t.id === editingTxnId ? { ...t, ...data, id: t.id, date: t.date } : t);
+      DB.saveMbTransactions(txns);
+      showTxnReceipt(editingTxnId);
+    } else {
+      const txn = { id: DB.nextId('mbTxn'), date: new Date().toISOString(), ...data };
+      txns.push(txn);
+      DB.saveMbTransactions(txns);
+      showTxnReceipt(txn.id);
+    }
+  }
+
+  function finishSave() {
+    const wasEditing = !!editingTxnId;
+    editingTxnId = null;
+    document.getElementById('txnFormTitle').textContent = 'New Transaction';
+    document.getElementById('saveTxnBtn').innerHTML = '<i class="fas fa-circle-check me-1"></i>Record Transaction';
+    document.getElementById('cancelEditBtn').classList.add('d-none');
+    renderAccountCards();
+    renderPendingBills();
+    renderTxnHistory();
+    APP.toast(wasEditing ? 'Transaction updated' : 'Transaction recorded');
+    resetForm();
+  }
 
   // ---- account management (admin/manager) ----
   function renderAcctList() {
@@ -4497,7 +4729,7 @@ PAGES.mobilebanking = async function (mount, session) {
       </li>`).join('');
     list.querySelectorAll('.delAcctBtn').forEach(b => b.addEventListener('click', () => {
       const id = Number(b.dataset.id);
-      if (txns.some(t => t.accountId === id)) { APP.toast('Cannot delete: this account has transaction history', 'warning'); return; }
+      if (txns.some(t => t.accountId === id || t.fromAccountId === id || t.toAccountId === id)) { APP.toast('Cannot delete: this account has transaction history', 'warning'); return; }
       accounts = accounts.filter(a => a.id !== id);
       DB.saveMbAccounts(accounts);
       renderAcctList(); fillAccountSelect(); renderAccountCards();
@@ -4527,8 +4759,9 @@ PAGES.mobilebanking = async function (mount, session) {
   fillAccountSelect();
   fillTxnSupplierSelect();
   fillTxnCustSelect();
-  updateBillerFieldLabel();
+  updateTypeFieldsVisibility();
   renderAccountCards();
+  renderPendingBills();
   renderTxnHistory();
 };
 
