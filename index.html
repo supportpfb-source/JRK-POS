@@ -165,6 +165,7 @@ body {
 .kpi-card.c2 { background: linear-gradient(135deg, #059669, #10b981); }
 .kpi-card.c3 { background: linear-gradient(135deg, #d97706, #f59e0b); }
 .kpi-card.c4 { background: linear-gradient(135deg, #db2777, #ec4899); }
+.kpi-card.cash { background: linear-gradient(135deg, #0f766e, #14b8a6); }
 .kpi-value { font-size: 1.6rem; font-weight: 700; }
 .kpi-label { font-size: .78rem; opacity: .9; }
 .kpi-icon { font-size: 1.6rem; opacity: .85; }
@@ -291,7 +292,8 @@ const DB = (() => {
     salaryDeductions: 'pos_salary_deductions',
     customRoles: 'pos_custom_roles',
     expenses: 'pos_expenses',
-    shiftSessions: 'pos_shift_sessions'
+    shiftSessions: 'pos_shift_sessions',
+    cashLedger: 'pos_cash_ledger'
   };
 
   function read(key, fallback) {
@@ -446,6 +448,7 @@ const DB = (() => {
     if (!read(KEYS.customRoles, null)) write(KEYS.customRoles, []);
     if (!read(KEYS.expenses, null)) write(KEYS.expenses, []);
     if (!read(KEYS.shiftSessions, null)) write(KEYS.shiftSessions, []);
+    if (!read(KEYS.cashLedger, null)) write(KEYS.cashLedger, []);
   }
 
   return {
@@ -481,7 +484,9 @@ const DB = (() => {
     getExpenses: () => read(KEYS.expenses, []),
     saveExpenses: (v) => write(KEYS.expenses, v),
     getShiftSessions: () => read(KEYS.shiftSessions, []),
-    saveShiftSessions: (v) => write(KEYS.shiftSessions, v)
+    saveShiftSessions: (v) => write(KEYS.shiftSessions, v),
+    getCashLedger: () => read(KEYS.cashLedger, []),
+    saveCashLedger: (v) => write(KEYS.cashLedger, v)
   };
 })();
 
@@ -1142,7 +1147,7 @@ const SHIFT = (() => {
       const wrap = ensureModal('shiftCloseModal', '<i class="fas fa-cash-register me-1"></i>Shift Closing Balances', '<i class="fas fa-right-from-bracket me-1"></i>Confirm &amp; Logout');
 
       document.getElementById('shiftCloseModalHint').textContent = 'Please count and enter the actual closing balance before logging out.';
-      let html = `<div class="mb-2"><label class="form-label small fw-semibold">Cash in Drawer (counted)</label><input type="number" class="form-control" id="shiftCloseCash" placeholder="0"></div>`;
+      let html = `<div class="mb-2"><label class="form-label small fw-semibold">Cash in Drawer (counted)</label><input type="number" class="form-control" id="shiftCloseCash" placeholder="${typeof CASH !== 'undefined' ? CASH.compute().total : 0}"></div>`;
       accounts.forEach(a => {
         html += `<div class="mb-2"><label class="form-label small">${APP.escapeHtml(a.provider)} - ${APP.escapeHtml(a.label)}</label><input type="number" class="form-control shift-close-acct" data-id="${a.id}" placeholder="${computeAccountBalance(a.id)}"></div>`;
       });
@@ -1173,6 +1178,239 @@ const SHIFT = (() => {
   }
 
   return { promptOpening, promptClosing, computeAccountBalance, lastClosedSession };
+})();
+
+</script>
+<script>
+/* =========================================================
+   Mobile POS — Cash in Hand
+   Cash in hand = the confirmed opening cash of the current shift
+   (or, if no shift is open, the last counted closing cash)
+   + every cash movement recorded since then:
+     + cash sales (tendered - change)
+     + cash collected on Mobile Banking bill/send, cash-in deposits
+     - cash handed out on cash-out, cash supplier payments
+     - expenses, purchases paid in cash
+     +/- customer credit received, wallet top-ups, supplier credit /
+       advances, and manual adjustments (stored in the cash ledger)
+   ========================================================= */
+
+const CASH = (() => {
+  const num = (v) => Number(v) || 0;
+
+  const LEDGER_LABELS = {
+    customer_credit: { label: 'Customer credit received', icon: 'fa-hand-holding-dollar' },
+    customer_wallet: { label: 'Customer wallet top-up / refund', icon: 'fa-wallet' },
+    supplier_credit: { label: 'Supplier credit paid', icon: 'fa-truck' },
+    supplier_wallet: { label: 'Supplier advance / refund', icon: 'fa-truck-fast' },
+    manual: { label: 'Manual cash adjustment', icon: 'fa-pen-to-square' }
+  };
+
+  function baseline() {
+    const curId = Number(localStorage.getItem('pos_current_shift_id'));
+    const cur = curId ? DB.getShiftSessions().find(s => s.id === curId) : null;
+    if (cur && cur.opening) return { opening: num(cur.opening.cash), since: cur.loginTime, text: 'Shift opening cash' };
+    const last = SHIFT.lastClosedSession();
+    if (last && last.closing) return { opening: num(last.closing.cash), since: last.logoutTime, text: 'Last closing cash' };
+    return { opening: 0, since: null, text: 'Opening cash' };
+  }
+
+  function compute() {
+    const base = baseline();
+    const sinceMs = base.since ? new Date(base.since).getTime() : 0;
+    const after = (iso) => !!iso && new Date(iso).getTime() >= sinceMs;
+
+    const lines = {};
+    const add = (key, label, icon, amount) => {
+      if (!lines[key]) lines[key] = { key, label, icon, amount: 0, count: 0 };
+      lines[key].amount += amount;
+      lines[key].count += 1;
+    };
+
+    // POS sales paid in cash
+    DB.getSales().forEach(s => {
+      if (s.paymentMethod !== 'Cash' || !after(s.date)) return;
+      const tendered = s.tendered != null ? num(s.tendered) : num(s.paid);
+      const net = Math.max(tendered - num(s.change), 0);
+      if (net) add('cashSales', 'Cash sales (POS)', 'fa-cart-shopping', net);
+    });
+
+    // Mobile Banking transactions that involve physical cash
+    DB.getMbTransactions().forEach(t => {
+      if (!after(t.date)) return;
+      if (t.type === 'bill' || t.type === 'send') {
+        const given = t.customerGiven != null
+          ? num(t.customerGiven)
+          : (t.paymentMode === 'credit' ? 0 : num(t.amount) + num(t.commission) - num(t.walletApplied));
+        const net = Math.max(given - num(t.changeReturned), 0);
+        if (net) add('mbCollected', 'Cash collected - bills / send money', 'fa-file-invoice-dollar', net);
+      } else if (t.type === 'cashin' && t.paymentMode !== 'credit') {
+        add('mbCashIn', 'Cash-in (customer deposits cash)', 'fa-arrow-down', num(t.amount));
+      } else if (t.type === 'cashout' && t.paymentMode !== 'credit') {
+        add('mbCashOut', 'Cash-out (cash given to customer)', 'fa-arrow-up', -num(t.amount));
+      } else if (t.type === 'supplier_payment' && t.supplierMode === 'cash') {
+        add('mbSupplier', 'Suppliers paid in cash (Mobile Banking)', 'fa-truck', -num(t.amount));
+      }
+    });
+
+    // Expenses
+    DB.getExpenses().forEach(e => {
+      const when = e.createdAt || (e.date ? e.date + 'T00:00:00' : null);
+      if (after(when)) add('expenses', 'Daily expenses', 'fa-receipt', -num(e.amount));
+    });
+
+    // Purchases (cash portion only; supplier wallet is not cash)
+    DB.getPurchases().forEach(po => {
+      if (!after(po.date)) return;
+      const paid = po.paid != null ? num(po.paid) : num(po.total);
+      const cash = Math.max(paid - num(po.walletApplied), 0);
+      if (cash) add('purchases', 'Purchases paid (stock-in)', 'fa-boxes-packing', -cash);
+    });
+
+    // Cash ledger (credit repayments, wallet top-ups, manual adjustments)
+    DB.getCashLedger().forEach(en => {
+      if (!after(en.date)) return;
+      const meta = LEDGER_LABELS[en.kind] || LEDGER_LABELS.manual;
+      add('ledger_' + en.kind, meta.label, meta.icon, num(en.amount));
+    });
+
+    const list = Object.values(lines);
+    const movement = list.reduce((s, l) => s + l.amount, 0);
+    return { opening: base.opening, openingText: base.text, since: base.since, lines: list, movement, total: base.opening + movement };
+  }
+
+  function addEntry(kind, signedAmount, note, userName) {
+    if (!signedAmount) return;
+    const ledger = DB.getCashLedger();
+    ledger.push({ id: DB.nextId('cashEntry'), date: new Date().toISOString(), kind, amount: signedAmount, note: note || '', userName: userName || '' });
+    DB.saveCashLedger(ledger);
+  }
+
+  function breakdownHtml(d) {
+    const row = (icon, label, amount, extra) => `
+      <tr>
+        <td><i class="fas ${icon} me-2 text-muted"></i>${APP.escapeHtml(label)}${extra || ''}</td>
+        <td class="text-end fw-semibold ${amount < 0 ? 'text-danger' : (amount > 0 ? 'text-success' : '')}">${amount > 0 ? '+' : ''}${APP.fmt(amount)}</td>
+      </tr>`;
+    const since = d.since ? ` <span class="text-muted small">(${APP.escapeHtml(APP.fmtDate(d.since))})</span>` : '';
+    return `
+      <table class="table table-sm mb-0">
+        <tbody>
+          <tr class="table-light"><td class="fw-semibold"><i class="fas fa-flag-checkered me-2 text-muted"></i>${APP.escapeHtml(d.openingText)}${since}</td><td class="text-end fw-semibold">${APP.fmt(d.opening)}</td></tr>
+          ${d.lines.length ? d.lines.map(l => row(l.icon, l.label, l.amount, ` <span class="text-muted small">&times;${l.count}</span>`)).join('') : '<tr><td colspan="2" class="text-muted small text-center py-2">No cash movement yet in this shift.</td></tr>'}
+          <tr class="table-light"><td class="fw-bold">Cash in Hand (expected)</td><td class="text-end fw-bold">${APP.fmt(d.total)}</td></tr>
+        </tbody>
+      </table>`;
+  }
+
+  function canAdjust(session) {
+    return !!session && (session.role === 'admin' || session.role === 'manager') && !AUTH.isReadOnly(session.role);
+  }
+
+  function ensureModal() {
+    let el = document.getElementById('cashDetailsModal');
+    if (el) return el;
+    const div = document.createElement('div');
+    div.innerHTML = `
+      <div class="modal fade" id="cashDetailsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+          <div class="modal-content">
+            <div class="modal-header"><h6 class="modal-title"><i class="fas fa-sack-dollar me-1"></i>Cash in Hand</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body" id="cashDetailsBody"></div>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(div.firstElementChild);
+    return document.getElementById('cashDetailsModal');
+  }
+
+  function openDetails(session, onChange) {
+    const el = ensureModal();
+
+    function render() {
+      const d = compute();
+      const recent = DB.getCashLedger().filter(e => e.kind === 'manual').slice(-8).reverse();
+      document.getElementById('cashDetailsBody').innerHTML = `
+        <div class="kpi-card cash mb-3">
+          <div class="kpi-label">Cash in Hand (expected in drawer)</div>
+          <div class="kpi-value">${APP.fmt(d.total)}</div>
+        </div>
+        ${breakdownHtml(d)}
+        <div class="small text-muted mt-2">Cash only - Card and Mobile/Bank account payments are not counted here. Compare this with the physical count when closing the shift.</div>
+        ${canAdjust(session) ? `
+        <hr>
+        <div class="fw-semibold small mb-2">Add / Remove Cash</div>
+        <div class="row g-2">
+          <div class="col-md-4">
+            <select class="form-select" id="cashAdjType">
+              <option value="in">Cash added to drawer (+)</option>
+              <option value="out">Cash taken out of drawer (-)</option>
+            </select>
+          </div>
+          <div class="col-md-3"><input type="number" min="0" class="form-control" id="cashAdjAmount" placeholder="Amount"></div>
+          <div class="col-md-3"><input class="form-control" id="cashAdjNote" placeholder="Note (e.g. owner deposit)"></div>
+          <div class="col-md-2"><button class="btn btn-brand w-100" id="cashAdjSave">Save</button></div>
+        </div>` : ''}
+        ${recent.length ? `
+        <div class="fw-semibold small mt-3 mb-1">Recent manual adjustments</div>
+        <table class="table table-sm mb-0">
+          <tbody>${recent.map(e => `
+            <tr><td class="small text-muted">${APP.escapeHtml(APP.fmtDate(e.date))}</td><td>${APP.escapeHtml(e.note || '-')}</td><td class="small text-muted">${APP.escapeHtml(e.userName || '')}</td>
+            <td class="text-end fw-semibold ${e.amount < 0 ? 'text-danger' : 'text-success'}">${e.amount > 0 ? '+' : ''}${APP.fmt(e.amount)}</td></tr>`).join('')}
+          </tbody>
+        </table>` : ''}`;
+
+      const saveBtn = document.getElementById('cashAdjSave');
+      if (saveBtn) saveBtn.addEventListener('click', () => {
+        const amount = Number(document.getElementById('cashAdjAmount').value) || 0;
+        const type = document.getElementById('cashAdjType').value;
+        const note = document.getElementById('cashAdjNote').value.trim();
+        if (amount <= 0) { APP.toast('Enter a valid amount', 'warning'); return; }
+        if (type === 'out' && amount > compute().total) { APP.toast('Not enough cash in hand for this withdrawal.', 'danger'); return; }
+        const signed = type === 'out' ? -amount : amount;
+        addEntry('manual', signed, note, session.fullName);
+        DB.logActivity(session.fullName, 'Cash Adjustment', `${signed > 0 ? '+' : '-'}${APP.fmt(amount)}${note ? ' - ' + note : ''}`);
+        APP.toast('Cash in hand updated');
+        render();
+        if (onChange) onChange();
+      });
+    }
+
+    render();
+    bootstrap.Modal.getOrCreateInstance(el).show();
+  }
+
+  // Dashboard section
+  function renderDashboardCard(container, session) {
+    function draw() {
+      const d = compute();
+      container.innerHTML = `
+        <div class="col-12">
+          <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <span><i class="fas fa-sack-dollar me-1"></i>Cash in Hand</span>
+              <button class="btn btn-sm btn-outline-secondary" id="cashDetailsBtn" data-ro-safe="true"><i class="fas fa-list me-1"></i>Details${canAdjust(session) ? ' / Adjust' : ''}</button>
+            </div>
+            <div class="card-body">
+              <div class="row g-3 align-items-center">
+                <div class="col-md-4">
+                  <div class="kpi-card cash h-100">
+                    <div class="kpi-label">Expected cash in drawer</div>
+                    <div class="kpi-value">${APP.fmt(d.total)}</div>
+                    <div class="kpi-label">${d.since ? 'Since ' + APP.escapeHtml(APP.fmtDate(d.since)) : 'All time'}</div>
+                  </div>
+                </div>
+                <div class="col-md-8">${breakdownHtml(d)}</div>
+              </div>
+            </div>
+          </div>
+        </div>`;
+      document.getElementById('cashDetailsBtn').addEventListener('click', () => openDetails(session, draw));
+    }
+    draw();
+  }
+
+  return { compute, addEntry, openDetails, renderDashboardCard, breakdownHtml };
 })();
 
 </script>
@@ -1223,6 +1461,8 @@ PAGES.dashboard = async function (mount, session) {
       </div>
     </div>
 
+    <div class="row g-3 mb-3" id="cashSection"></div>
+
     <div class="row g-3">
       <div class="col-lg-7">
         <div class="card h-100">
@@ -1270,6 +1510,8 @@ PAGES.dashboard = async function (mount, session) {
       </div>
     </div>
   `;
+
+  CASH.renderDashboardCard(document.getElementById('cashSection'), session);
 
   mount.querySelectorAll('a[data-nav]').forEach(a => {
     a.addEventListener('click', (e) => { e.preventDefault(); APP.navigateTo(a.dataset.nav); });
@@ -2488,6 +2730,7 @@ PAGES.customers = async function (mount, session) {
     customers = customers.map(c => c.id === walletCustId ? { ...c, creditBalance: Math.max((c.creditBalance || 0) - amount, 0) } : c);
     DB.saveCustomers(customers);
     const c = customers.find(x => x.id === walletCustId);
+    CASH.addEntry('customer_credit', amount, c.name, session.fullName);
     DB.logActivity(session.fullName, 'Credit Payment Received', `${c.name} — ${APP.fmt(amount)}`);
     document.getElementById('creditCurBalance').textContent = APP.fmt(c.creditBalance || 0);
     document.getElementById('creditPayInput').value = '';
@@ -2498,9 +2741,11 @@ PAGES.customers = async function (mount, session) {
   document.getElementById('applyWalletAdjustBtn').addEventListener('click', () => {
     const amount = Number(document.getElementById('walletAdjustInput').value) || 0;
     if (amount === 0) { APP.toast('Enter a non-zero amount', 'warning'); return; }
+    const walletBefore = (customers.find(x => x.id === walletCustId) || {}).walletBalance || 0;
     customers = customers.map(c => c.id === walletCustId ? { ...c, walletBalance: Math.max((c.walletBalance || 0) + amount, 0) } : c);
     DB.saveCustomers(customers);
     const c = customers.find(x => x.id === walletCustId);
+    CASH.addEntry('customer_wallet', (c.walletBalance || 0) - walletBefore, c.name, session.fullName);
     DB.logActivity(session.fullName, 'Wallet Adjusted', `${c.name} — ${amount > 0 ? '+' : ''}${APP.fmt(amount)}`);
     document.getElementById('walletCurBalance').textContent = APP.fmt(c.walletBalance || 0);
     document.getElementById('walletAdjustInput').value = '';
@@ -2951,6 +3196,7 @@ PAGES.purchases = async function (mount, session) {
     suppliers = suppliers.map(s => s.id === walletSupId ? { ...s, creditBalance: Math.max((s.creditBalance || 0) - amount, 0) } : s);
     DB.saveSuppliers(suppliers);
     const s = suppliers.find(x => x.id === walletSupId);
+    CASH.addEntry('supplier_credit', -amount, s.name, session.fullName);
     DB.logActivity(session.fullName, 'Supplier Credit Payment', `${s.name} — ${APP.fmt(amount)}`);
     document.getElementById('supCreditCurBalance').textContent = APP.fmt(s.creditBalance || 0);
     document.getElementById('supCreditPayInput').value = '';
@@ -2961,9 +3207,11 @@ PAGES.purchases = async function (mount, session) {
   document.getElementById('applySupWalletAdjustBtn').addEventListener('click', () => {
     const amount = Number(document.getElementById('supWalletAdjustInput').value) || 0;
     if (amount === 0) { APP.toast('Enter a non-zero amount', 'warning'); return; }
+    const supWalletBefore = (suppliers.find(x => x.id === walletSupId) || {}).walletBalance || 0;
     suppliers = suppliers.map(s => s.id === walletSupId ? { ...s, walletBalance: Math.max((s.walletBalance || 0) + amount, 0) } : s);
     DB.saveSuppliers(suppliers);
     const s = suppliers.find(x => x.id === walletSupId);
+    CASH.addEntry('supplier_wallet', -((s.walletBalance || 0) - supWalletBefore), s.name, session.fullName);
     DB.logActivity(session.fullName, 'Supplier Wallet Adjusted', `${s.name} — ${amount > 0 ? '+' : ''}${APP.fmt(amount)}`);
     document.getElementById('supWalletCurBalance').textContent = APP.fmt(s.walletBalance || 0);
     document.getElementById('supWalletAdjustInput').value = '';
@@ -4026,11 +4274,12 @@ PAGES.mobilebanking = async function (mount, session) {
   // (paid from account) take money OUT of an account. Transfers move
   // between two of our own accounts.
   // ---------------------------------------------------------------
-  function balanceOf(acctId) {
+  function balanceOf(acctId, excludeTxnId) {
     const acct = accounts.find(a => a.id === acctId);
     if (!acct) return 0;
     let bal = acct.openingBalance || 0;
     txns.forEach(t => {
+      if (excludeTxnId && t.id === excludeTxnId) return; // when validating an edit, ignore the transaction's old (pre-edit) effect
       if (t.type === 'transfer') {
         if (t.fromAccountId === acctId) bal -= t.amount;
         if (t.toAccountId === acctId) bal += t.amount;
@@ -4052,14 +4301,23 @@ PAGES.mobilebanking = async function (mount, session) {
 
   function renderAccountCards() {
     const colors = ['c1', 'c2', 'c3', 'c4'];
-    document.getElementById('acctCards').innerHTML = accounts.length ? accounts.map((a, i) => `
+    const cashTile = `
+      <div class="col-6 col-lg-3">
+        <div class="kpi-card cash h-100" id="cashTile" style="cursor:pointer;" title="Click for breakdown">
+          <div class="kpi-label"><i class="fas fa-sack-dollar me-1"></i>Cash in Hand</div>
+          <div class="kpi-value">${APP.fmt(CASH.compute().total)}</div>
+          <div class="kpi-label">Tap for details</div>
+        </div>
+      </div>`;
+    document.getElementById('acctCards').innerHTML = cashTile + (accounts.length ? accounts.map((a, i) => `
       <div class="col-6 col-lg-3">
         <div class="kpi-card ${colors[i % colors.length]} h-100">
           <div class="kpi-label"><i class="fas ${a.type === 'bank' ? 'fa-building-columns' : 'fa-mobile-screen'} me-1"></i>${APP.escapeHtml(a.provider)} — ${APP.escapeHtml(a.label)}</div>
           <div class="kpi-value">${APP.fmt(balanceOf(a.id))}</div>
           <div class="kpi-label">${APP.escapeHtml(a.accountNumber)}</div>
         </div>
-      </div>`).join('') : `<div class="col-12"><div class="alert alert-warning mb-0">No mobile accounts set up yet. ${canManageAccounts ? 'Click "Accounts" to add JazzCash / EasyPaisa / Bank.' : 'Ask an admin to add JazzCash / EasyPaisa / Bank accounts.'}</div></div>`;
+      </div>`).join('') : `<div class="col-12"><div class="alert alert-warning mb-0">No mobile accounts set up yet. ${canManageAccounts ? 'Click "Accounts" to add JazzCash / EasyPaisa / Bank.' : 'Ask an admin to add JazzCash / EasyPaisa / Bank accounts.'}</div></div>`);
+    document.getElementById('cashTile').addEventListener('click', () => CASH.openDetails(session, renderAccountCards));
   }
 
   function fillAccountSelect() {
@@ -4334,7 +4592,8 @@ PAGES.mobilebanking = async function (mount, session) {
       const acct = accounts.find(a => a.id === payFromId);
       const totalAmount = txns.filter(t => ids.includes(t.id)).reduce((s, t) => s + t.amount, 0);
       if (balanceOf(payFromId) < totalAmount) {
-        if (!APP.confirmAction(`${acct ? acct.provider + ' - ' + acct.label : 'This account'} balance looks lower than the total being settled (${APP.fmt(totalAmount)}). Continue anyway?`)) return;
+        APP.toast(`${acct ? acct.provider + ' - ' + acct.label : 'This account'} balance is insufficient for the total being settled (${APP.fmt(totalAmount)}).`, 'danger');
+        return;
       }
       const idSet = new Set(ids);
       txns = txns.map(t => idSet.has(t.id) ? { ...t, billStatus: 'paid', accountId: payFromId } : t);
@@ -4574,6 +4833,10 @@ PAGES.mobilebanking = async function (mount, session) {
       const amount = Number(document.getElementById('txnAmount').value) || 0;
       if (amount <= 0) { APP.toast('Enter a valid amount', 'warning'); return; }
       if (fromId === toId) { APP.toast('From and To accounts must be different', 'warning'); return; }
+      if (balanceOf(fromId, editingTxnId) < amount) {
+        APP.toast('Insufficient balance in the From account for this transfer.', 'danger');
+        return;
+      }
       if (editingTxnId) reverseTxnEffects(txns.find(x => x.id === editingTxnId));
 
       const txnData = {
@@ -4600,8 +4863,9 @@ PAGES.mobilebanking = async function (mount, session) {
       if (supplierMode === 'account') {
         accountId = Number(document.getElementById('txnAccount').value);
         if (!accountId) { APP.toast('Select an account', 'warning'); return; }
-        if (balanceOf(accountId) < totals.amount) {
-          if (!APP.confirmAction('This account balance looks lower than the transaction amount. Continue anyway?')) return;
+        if (balanceOf(accountId, editingTxnId) < totals.amount) {
+          APP.toast('Insufficient balance in the selected account for this payment.', 'danger');
+          return;
         }
       }
       if (editingTxnId) reverseTxnEffects(txns.find(x => x.id === editingTxnId));
@@ -4632,8 +4896,9 @@ PAGES.mobilebanking = async function (mount, session) {
     const isPayLater = type === 'bill' && document.getElementById('payLaterChk').checked;
     // A Pay Later bill hasn't actually left any account yet, so a low-balance
     // warning against the "planned" account here would be misleading.
-    if (!isPayLater && (type === 'bill' || type === 'send' || type === 'cashin') && balanceOf(accountId) < totals.amount) {
-      if (!APP.confirmAction('This account balance looks lower than the transaction amount. Continue anyway?')) return;
+    if (!isPayLater && (type === 'bill' || type === 'send' || type === 'cashin') && balanceOf(accountId, editingTxnId) < totals.amount) {
+      APP.toast('Insufficient balance in the selected account for this transaction.', 'danger');
+      return;
     }
 
     const cust = (type === 'bill' || type === 'send') ? getSelectedTxnCustomer() : null;
